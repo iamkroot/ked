@@ -7,8 +7,12 @@ use termios::{self, Termios};
 const STDIN_FD: RawFd = 0;
 fn enable_raw_mode() -> io::Result<()> {
     let mut t = termios::Termios::from_fd(STDIN_FD)?;
+    use termios::{BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST};
     termios::tcgetattr(STDIN_FD, &mut t)?;
-    t.c_lflag &= !(termios::ECHO | termios::ICANON);
+    t.c_iflag &= !(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    t.c_oflag &= !(OPOST);
+    t.c_cflag |= CS8;
+    t.c_lflag &= !(ECHO | ICANON | IEXTEN | ISIG);
     termios::tcsetattr(STDIN_FD, termios::TCSAFLUSH, &t)?;
     Ok(())
 }
@@ -37,20 +41,27 @@ impl Drop for Cleanup {
 }
 
 fn main() -> io::Result<()> {
-    let mut stdin = std::io::stdin();
-    let _ = Cleanup::new();
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("ked.log")?;
+    env_logger::builder()
+        .parse_default_env()
+        .filter_level(log::LevelFilter::Debug)
+        .target(env_logger::Target::Pipe(Box::new(log_file)))
+        .init();
+    let mut stdin = std::io::stdin().lock();
+    let cleanup = Cleanup::new()?;
     enable_raw_mode().expect("failed to enable raw");
-    // let lock = stdin.lock();
     let mut buf = [0; 1];
     while stdin.read(&mut buf)? == 1 && buf[0] != b'q' {
-        // let c = buf[0];
         let c = char::from(buf[0]);
         if c.is_ascii_control() {
-            println!("{}", buf[0]);
+            println!("{}\r", buf[0]);
         } else {
-            println!("{} ('{c}')", buf[0]);
+            println!("{} ('{c}')\r", buf[0]);
         }
-        // read
     }
+    drop(cleanup);
     Ok(())
 }
