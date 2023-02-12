@@ -46,8 +46,8 @@ struct TermSize {
 
 #[derive(Debug, Default)]
 struct Pos {
-    x: u16,
-    y: u16,
+    x: usize,
+    y: usize,
 }
 
 struct Ked {
@@ -58,7 +58,7 @@ struct Ked {
     buf: Vec<u8>,
     cur: Pos,
     rows: Vec<String>,
-    rowoff: u16,
+    rowoff: usize,
 }
 
 mod escape_seq {
@@ -174,18 +174,16 @@ impl Ked {
             k if k == ctrl_key(b'q') as _ => return Err(KError::Quit),
             // probably need to accomodate scrolling in the future
             keys::UP => self.cur.y = self.cur.y.saturating_sub(1),
-            keys::DOWN => {
-                self.cur.y = (self.cur.y + 1).min((self.rows.len().saturating_sub(1)) as u16)
-            }
+            keys::DOWN => self.cur.y = (self.cur.y + 1).min(self.rows.len().saturating_sub(1)),
             keys::LEFT => self.cur.x = self.cur.x.saturating_sub(1),
-            keys::RIGHT => self.cur.x = (self.cur.x + 1).min(self.screen_size.col - 1),
-            keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row - 1),
+            keys::RIGHT => self.cur.x = (self.cur.x + 1).min(self.screen_size.col as usize - 1),
+            keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row as usize - 1),
             keys::PGDOWN => {
-                self.cur.y = (self.cur.y + self.screen_size.row - 1)
-                    .min(self.rows.len().saturating_sub(1) as u16)
+                self.cur.y = (self.cur.y + self.screen_size.row as usize - 1)
+                    .min(self.rows.len().saturating_sub(1))
             }
             keys::HOME => self.cur.x = 0,
-            keys::END => self.cur.x = self.screen_size.col - 1,
+            keys::END => self.cur.x = self.screen_size.col as usize - 1,
             _ => {
                 let ch: char = char::from_u32(c).expect("invalid char");
                 if ch.is_ascii_control() {
@@ -208,8 +206,8 @@ impl Ked {
 
     fn scroll_screen(&mut self) {
         self.rowoff = self.rowoff.min(self.cur.y);
-        if self.cur.y >= self.rowoff + self.screen_size.row {
-            self.rowoff = self.cur.y.saturating_sub(self.screen_size.row) + 1;
+        if self.cur.y >= self.rowoff + self.screen_size.row as usize {
+            self.rowoff = self.cur.y.saturating_sub(self.screen_size.row as usize) + 1;
         }
     }
 
@@ -245,10 +243,10 @@ impl Ked {
     }
 
     fn draw_rows(&mut self) -> VoidResult {
-        for y in 0..self.screen_size.row {
-            let filerow = (y + self.rowoff) as usize;
+        for y in 0..self.screen_size.row as usize {
+            let filerow = y + self.rowoff;
             if filerow >= self.rows.len() {
-                if self.rows.is_empty() && y == self.screen_size.row / 3 {
+                if self.rows.is_empty() && y == self.screen_size.row as usize/ 3 {
                     write!(
                         self.buf,
                         "{:^width$}",
@@ -265,7 +263,7 @@ impl Ked {
                 write!(self.buf, "{clipped}")?;
             }
             esc_write!(self.buf, CLEAR_TRAIL_LINE)?;
-            if y < self.screen_size.row - 1 {
+            if y < self.screen_size.row as usize - 1 {
                 write!(self.buf, "\r\n")?;
             }
         }
