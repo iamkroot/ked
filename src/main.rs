@@ -35,33 +35,6 @@ const fn ctrl_key(k: u8) -> u8 {
     k & 0b0001_1111
 }
 
-#[derive(Debug)]
-#[repr(C)]
-struct TermSize {
-    row: libc::c_ushort,
-    col: libc::c_ushort,
-    _x: libc::c_ushort,
-    _y: libc::c_ushort,
-}
-
-#[derive(Debug, Default)]
-struct Pos {
-    x: usize,
-    y: usize,
-}
-
-struct Ked {
-    stdin: File,
-    stdout: File,
-    orig_termios: Termios,
-    screen_size: TermSize,
-    buf: Vec<u8>,
-    cur: Pos,
-    rows: Vec<String>,
-    rowoff: usize,
-    coloff: usize,
-}
-
 mod escape_seq {
     pub(crate) const CLEAR: &[u8] = b"2J";
     pub(crate) const CLEAR_TRAIL_LINE: &[u8] = b"K";
@@ -103,6 +76,37 @@ macro_rules! esc_write {
     };
 }
 
+#[derive(Debug)]
+#[repr(C)]
+struct TermSize {
+    row: libc::c_ushort,
+    col: libc::c_ushort,
+    _x: libc::c_ushort,
+    _y: libc::c_ushort,
+}
+
+#[derive(Debug, Default)]
+struct Pos {
+    x: usize,
+    y: usize,
+}
+
+struct Ked {
+    stdin: File,
+    stdout: File,
+    orig_termios: Termios,
+    screen_size: TermSize,
+    buf: Vec<u8>,
+    cur: Pos,
+    rows: Vec<String>,
+    render_rows: Vec<String>,
+    render_pos_x: usize,
+    rowoff: usize,
+    coloff: usize,
+}
+
+const TAB_STOP: usize = 4;
+
 impl Ked {
     fn new() -> KResult<Self> {
         Ok(Ked {
@@ -116,6 +120,8 @@ impl Ked {
             rows: Vec::new(),
             rowoff: 0,
             coloff: 0,
+            render_rows: Vec::new(),
+            render_pos_x: 0,
         })
     }
 
@@ -207,11 +213,13 @@ impl Ked {
                     self.cur.x -= 1;
                 }
             }
-            keys::RIGHT => if self.cur.x == row.map_or(self.cur.x, |row| row.len()) {
-                self.cur.y = (self.cur.y + 1).min(self.rows.len());
-                self.cur.x = 0;
-            } else {
-                self.cur.x += 1;
+            keys::RIGHT => {
+                if self.cur.x == row.map_or(self.cur.x, |row| row.len()) {
+                    self.cur.y = (self.cur.y + 1).min(self.rows.len());
+                    self.cur.x = 0;
+                } else {
+                    self.cur.x += 1;
+                }
             }
             keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row as usize - 1),
             keys::PGDOWN => {
@@ -234,13 +242,27 @@ impl Ked {
     }
 
     fn scroll_screen(&mut self) {
+        // convert from "document" coordinate to "rendered" coordinate
+        self.render_pos_x = self.rows.get(self.cur.y).map_or(0, |row| {
+            row.chars().take(self.cur.x).fold(0, |acc, c| {
+                acc + if c == '\t' {
+                    TAB_STOP - (acc % TAB_STOP)
+                } else {
+                    1
+                }
+            })
+        });
+
         self.rowoff = self.rowoff.min(self.cur.y);
         if self.cur.y >= self.rowoff + self.screen_size.row as usize {
             self.rowoff = self.cur.y.saturating_sub(self.screen_size.row as usize) + 1;
         }
-        self.coloff = self.coloff.min(self.cur.x);
-        if self.cur.x >= self.coloff + self.screen_size.col as usize {
-            self.coloff = self.cur.x.saturating_sub(self.screen_size.col as usize) + 1;
+        self.coloff = self.coloff.min(self.render_pos_x);
+        if self.render_pos_x >= self.coloff + self.screen_size.col as usize {
+            self.coloff = self
+                .render_pos_x
+                .saturating_sub(self.screen_size.col as usize)
+                + 1;
         }
     }
 
@@ -259,13 +281,13 @@ impl Ked {
     /// Write into `self.buf` the escape sequence needed to move cursor to `self.cur`.
     ///
     /// * Assumes `self.cur` is 0-indexed, whereas the terminal cursor needs to be 1-indexed.
-    /// * Also transforms `self.cur.y` into `row` and `self.cur.x` into `col`.
+    /// * Also transforms `self.cur.y` into `row` and `self.render_pos_x` into `col`.
     fn write_move_cur(&mut self) -> VoidResult {
         write!(
             self.buf,
             "\x1b[{};{}H",
             self.cur.y - self.rowoff + 1,
-            self.cur.x - self.coloff + 1
+            self.render_pos_x - self.coloff + 1
         )?;
         Ok(())
     }
@@ -290,7 +312,7 @@ impl Ked {
                     write!(self.buf, "~")?;
                 }
             } else {
-                let row = &self.rows[filerow];
+                let row = &self.render_rows[filerow];
                 // only show the line if it is visible region
                 if self.coloff <= row.len() {
                     // need to clip manually. using std::fmt's width option causes line wraps.
@@ -314,6 +336,31 @@ impl Ked {
             .open(path.as_ref())?;
         let reader = BufReader::new(f);
         self.rows = reader.lines().collect::<Result<Vec<_>, _>>()?;
+        self.render_rows = self
+            .rows
+            .iter()
+            .map(|line| {
+                let mut out = String::with_capacity(
+                    line.chars()
+                        .map(|c| if c == '\t' { TAB_STOP } else { 1 })
+                        .sum(),
+                );
+                line.chars().fold(0, |acc, c| {
+                    acc + match c {
+                        '\t' => {
+                            let extra_spaces = TAB_STOP - (acc % TAB_STOP);
+                            out.extend(std::iter::repeat(' ').take(extra_spaces));
+                            extra_spaces
+                        }
+                        _ => {
+                            out.push(c);
+                            1
+                        }
+                    }
+                });
+                out
+            })
+            .collect();
         log::trace!(
             "Opened file: {} with {} lines.",
             path.as_ref().display(),
