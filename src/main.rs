@@ -145,41 +145,35 @@ impl Ked {
         });
     }
     fn read_key(&mut self) -> KResult<u32> {
-        let mut c: u8 = 0;
-        let _ = self.stdin.read(std::slice::from_mut(&mut c))?;
-        let key: u32 = if c == b'\x1b' {
-            let _ = self.stdin.read(std::slice::from_mut(&mut c))?;
-            if c == b'[' {
-                let _ = self.stdin.read(std::slice::from_mut(&mut c))?;
-                match c {
-                    b'A' => keys::UP,
-                    b'B' => keys::DOWN,
-                    b'C' => keys::RIGHT,
-                    b'D' => keys::LEFT,
-                    b'H' => keys::HOME,
-                    b'F' => keys::END,
-                    b'0'..=b'9' => {
-                        let mut last: u8 = 0;
-                        let _ = self.stdin.read(std::slice::from_mut(&mut last))?;
-                        if last == b'~' {
-                            match c {
-                                b'1' | b'7' => keys::HOME,
-                                b'5' => keys::PGUP,
-                                b'6' => keys::PGDOWN,
-                                b'4' | b'8' => keys::HOME,
-                                _ => b'\x1b' as _,
-                            }
-                        } else {
-                            b'\x1b' as _
-                        }
-                    }
-                    _ => b'\x1b' as _,
-                }
-            } else {
-                b'\x1b' as _
+        let mut buf = [0; 4];
+        let mut n: usize;
+        // block till we read *something*
+        loop {
+            n = self.stdin.read(&mut buf)?;
+            if n != 0 {
+                break;
             }
-        } else {
-            c as _
+        }
+        let key: u32 = match &buf[0..2] {
+            b"\x1b[" => {
+                match &buf[2..n] {
+                    b"A" => keys::UP,
+                    b"B" => keys::DOWN,
+                    b"C" => keys::RIGHT,
+                    b"D" => keys::LEFT,
+                    b"H" => keys::HOME,
+                    b"F" => keys::END,
+                    b"1~" | b"7~" => keys::HOME,
+                    b"4~" | b"8~" => keys::END,
+                    b"5~" => keys::PGUP,
+                    b"6~" => keys::PGDOWN,
+                    _ => {
+                        log::warn!("Weird data on stdin: {buf:?}");
+                        b'\x1b' as _
+                    }
+                }
+            }
+            _ => buf[0] as _,
         };
         Ok(key)
     }
@@ -193,7 +187,7 @@ impl Ked {
             keys::UP => self.cur.y = self.cur.y.saturating_sub(1),
             keys::DOWN => self.cur.y = (self.cur.y + 1).min(self.screen_size.row - 1),
             keys::LEFT => self.cur.x = self.cur.x.saturating_sub(1),
-            keys::RIGHT => self.cur.x = (self.cur.x + 1).min(self.screen_size.col -1),
+            keys::RIGHT => self.cur.x = (self.cur.x + 1).min(self.screen_size.col - 1),
             keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row - 1),
             keys::PGDOWN => self.cur.y = self.screen_size.row - 1,
             keys::HOME => self.cur.x = 0,
