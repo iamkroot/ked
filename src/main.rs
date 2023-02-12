@@ -48,6 +48,7 @@ struct Ked {
     stdout: File,
     orig_termios: Termios,
     screen_size: TermSize,
+    buf: Vec<u8>,
 }
 
 mod escape_seq {
@@ -69,13 +70,11 @@ mod escape_seq {
 }
 
 macro_rules! esc_write {
-    ($ked: ident, $val: ident) => {
-        $ked.stdout
-            .write_all(const_str::concat_bytes!(b"\x1b[", escape_seq::$val))
+    ($file: expr, $val: ident) => {
+        $file.write_all(const_str::concat_bytes!(b"\x1b[", escape_seq::$val))
     };
-    ($ked: ident, $val: expr) => {
-        $ked.stdout
-            .write_all(const_str::concat_bytes!(b"\x1b[", $val))
+    ($file: expr, $val: expr) => {
+        $file.write_all(const_str::concat_bytes!(b"\x1b[", $val))
     };
 }
 
@@ -86,6 +85,8 @@ impl Ked {
             stdout: unsafe { File::from_raw_fd(STDOUT_FD) },
             orig_termios: Termios::from_fd(STDIN_FD)?,
             screen_size: Self::get_window_size()?,
+            // assume that we'll need to write at least these many bytes
+            buf: Vec::with_capacity(48),
         })
     }
 
@@ -121,9 +122,9 @@ impl Ked {
             _ => {
                 let ch: char = c.into();
                 if ch.is_ascii_control() {
-                    write!(self.stdout, "{c}\r")?;
+                    write!(self.buf, "{c}\r")?;
                 } else {
-                    write!(self.stdout, "{c} ('{ch}')\r")?;
+                    write!(self.buf, "{c} ('{ch}')\r")?;
                 }
             }
         }
@@ -131,23 +132,30 @@ impl Ked {
     }
 
     fn clear_screen(&mut self) -> VoidResult {
-        esc_write!(self, CLEAR)?;
-        esc_write!(self, RESET_CURSOR)?;
+        esc_write!(self.buf, CLEAR)?;
+        esc_write!(self.buf, RESET_CURSOR)?;
         Ok(())
     }
 
     fn refresh_screen(&mut self) -> VoidResult {
+        self.buf.clear();
         self.clear_screen()?;
         self.draw_rows()?;
-        esc_write!(self, RESET_CURSOR)?;
+        esc_write!(self.buf, RESET_CURSOR)?;
+        self.flush_buf()?;
+        Ok(())
+    }
+
+    fn flush_buf(&mut self) -> VoidResult {
+        self.stdout.write_all(self.buf.as_slice())?;
         Ok(())
     }
 
     fn draw_rows(&mut self) -> VoidResult {
         for i in 0..self.screen_size.row {
-            write!(self.stdout, "~{i}")?;
+            write!(self.buf, "~{i}")?;
             if i < self.screen_size.row - 1 {
-                self.stdout.write_all(b"\r\n")?;
+                self.buf.write_all(b"\r\n")?;
             }
         }
         Ok(())
@@ -156,9 +164,11 @@ impl Ked {
 
 impl Drop for Ked {
     fn drop(&mut self) {
-        self.clear_screen().unwrap_or_else(|e| {
-            error!("Failed to clear screen on exit: {e}");
-        });
+        self.clear_screen()
+            .and_then(|_| self.flush_buf())
+            .unwrap_or_else(|e| {
+                error!("Failed to clear screen on exit: {e}");
+            });
         self.disable_raw_mode();
     }
 }
@@ -180,7 +190,7 @@ fn main() -> VoidResult {
     loop {
         ked.refresh_screen()?;
         if let Err(e) = ked.process_key() {
-            ked.clear_screen()?;
+            ked.clear_screen().and_then(|_| ked.flush_buf())?;
             if e.is_quit() {
                 // just a simple quit
             } else {
