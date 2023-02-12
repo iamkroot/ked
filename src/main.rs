@@ -199,9 +199,19 @@ impl Ked {
         match key {
             keys::UP => self.cur.y = self.cur.y.saturating_sub(1),
             keys::DOWN => self.cur.y = (self.cur.y + 1).min(self.rows.len()),
-            keys::LEFT => self.cur.x = self.cur.x.saturating_sub(1),
-            keys::RIGHT => {
-                self.cur.x = (self.cur.x + 1).min(row.map_or(self.cur.x, |row| row.len()))
+            keys::LEFT => {
+                if self.cur.x == 0 {
+                    self.cur.y = self.cur.y.saturating_sub(1);
+                    self.cur.x = self.rows.get(self.cur.y).map_or(0, |row| row.len());
+                } else {
+                    self.cur.x -= 1;
+                }
+            }
+            keys::RIGHT => if self.cur.x == row.map_or(self.cur.x, |row| row.len()) {
+                self.cur.y = (self.cur.y + 1).min(self.rows.len());
+                self.cur.x = 0;
+            } else {
+                self.cur.x += 1;
             }
             keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row as usize - 1),
             keys::PGDOWN => {
