@@ -60,7 +60,6 @@ struct Ked {
     rows: Vec<String>,
     rowoff: usize,
     coloff: usize,
-    max_line_length: Option<usize>,
 }
 
 mod escape_seq {
@@ -117,7 +116,6 @@ impl Ked {
             rows: Vec::new(),
             rowoff: 0,
             coloff: 0,
-            max_line_length: None,
         })
     }
 
@@ -176,23 +174,14 @@ impl Ked {
         log::trace!(target: "keytrace", "Key {c}");
         match c {
             k if k == ctrl_key(b'q') as _ => return Err(KError::Quit),
-            // probably need to accomodate scrolling in the future
-            keys::UP => self.cur.y = self.cur.y.saturating_sub(1),
-            keys::DOWN => self.cur.y = (self.cur.y + 1).min(self.rows.len().saturating_sub(1)),
-            keys::LEFT => self.cur.x = self.cur.x.saturating_sub(1),
-            keys::RIGHT => {
-                self.cur.x = (self.cur.x + 1).min(
-                    self.max_line_length
-                        .unwrap_or(self.screen_size.col as usize - 1),
-                )
-            }
-            keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row as usize - 1),
-            keys::PGDOWN => {
-                self.cur.y = (self.cur.y + self.screen_size.row as usize - 1)
-                    .min(self.rows.len().saturating_sub(1))
-            }
-            keys::HOME => self.cur.x = 0,
-            keys::END => self.cur.x = self.screen_size.col as usize - 1,
+            keys::UP
+            | keys::DOWN
+            | keys::LEFT
+            | keys::RIGHT
+            | keys::PGUP
+            | keys::PGDOWN
+            | keys::HOME
+            | keys::END => self.move_cursor(c),
             _ => {
                 let ch: char = char::from_u32(c).expect("invalid char");
                 if ch.is_ascii_control() {
@@ -203,6 +192,27 @@ impl Ked {
             }
         }
         Ok(())
+    }
+
+    fn move_cursor(&mut self, key: u32) {
+        let row = self.rows.get(self.cur.y);
+        match key {
+            keys::UP => self.cur.y = self.cur.y.saturating_sub(1),
+            keys::DOWN => self.cur.y = (self.cur.y + 1).min(self.rows.len()),
+            keys::LEFT => self.cur.x = self.cur.x.saturating_sub(1),
+            keys::RIGHT => {
+                self.cur.x = (self.cur.x + 1).min(row.map_or(self.cur.x, |row| row.len()))
+            }
+            keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row as usize - 1),
+            keys::PGDOWN => {
+                self.cur.y = (self.cur.y + self.screen_size.row as usize - 1).min(self.rows.len())
+            }
+            keys::HOME => self.cur.x = 0,
+            keys::END => self.cur.x = row.map_or(0, |row| row.len()),
+            _ => panic!("Unknown movement key"),
+        }
+        let row = self.rows.get(self.cur.y);
+        self.cur.x = self.cur.x.min(row.map_or(0, |row| row.len()));
     }
 
     fn clear_screen(&mut self) -> VoidResult {
@@ -294,12 +304,10 @@ impl Ked {
             .open(path.as_ref())?;
         let reader = BufReader::new(f);
         self.rows = reader.lines().collect::<Result<Vec<_>, _>>()?;
-        self.max_line_length = Some(self.rows.iter().fold(0, |max_len, l| l.len().max(max_len)));
         log::trace!(
-            "Opened file: {} with {} lines and max_line_length {}.",
+            "Opened file: {} with {} lines.",
             path.as_ref().display(),
             self.rows.len(),
-            self.max_line_length.unwrap(),
         );
         Ok(())
     }
