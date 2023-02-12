@@ -53,6 +53,9 @@ struct Ked {
 
 mod escape_seq {
     pub(crate) const CLEAR: &[u8] = b"2J";
+    pub(crate) const CLEAR_TRAIL_LINE: &[u8] = b"K";
+    pub(crate) const HIDE_CURSOR: &[u8] = b"?25l";
+    pub(crate) const UNHIDE_CURSOR: &[u8] = b"?25h";
     pub(crate) const RESET_CURSOR: &[u8] = b"1;1H";
 
     #[allow(unused_macros)]
@@ -132,16 +135,20 @@ impl Ked {
     }
 
     fn clear_screen(&mut self) -> VoidResult {
+        self.buf.clear();
         esc_write!(self.buf, CLEAR)?;
         esc_write!(self.buf, RESET_CURSOR)?;
+        self.flush_buf()?;
         Ok(())
     }
 
     fn refresh_screen(&mut self) -> VoidResult {
         self.buf.clear();
-        self.clear_screen()?;
+        esc_write!(self.buf, HIDE_CURSOR)?;
+        esc_write!(self.buf, RESET_CURSOR)?;
         self.draw_rows()?;
         esc_write!(self.buf, RESET_CURSOR)?;
+        esc_write!(self.buf, UNHIDE_CURSOR)?;
         self.flush_buf()?;
         Ok(())
     }
@@ -152,10 +159,20 @@ impl Ked {
     }
 
     fn draw_rows(&mut self) -> VoidResult {
-        for i in 0..self.screen_size.row {
-            write!(self.buf, "~{i}")?;
-            if i < self.screen_size.row - 1 {
-                self.buf.write_all(b"\r\n")?;
+        for y in 0..self.screen_size.row {
+            if y == self.screen_size.row / 3 {
+                write!(
+                    self.buf,
+                    "{:^width$}",
+                    concat!("Welcome to ked -- ", env!("CARGO_PKG_VERSION")),
+                    width = self.screen_size.col as usize
+                )?;
+            } else {
+                write!(self.buf, "~")?;
+            }
+            esc_write!(self.buf, CLEAR_TRAIL_LINE)?;
+            if y < self.screen_size.row - 1 {
+                write!(self.buf, "\r\n")?;
             }
         }
         Ok(())
@@ -164,11 +181,9 @@ impl Ked {
 
 impl Drop for Ked {
     fn drop(&mut self) {
-        self.clear_screen()
-            .and_then(|_| self.flush_buf())
-            .unwrap_or_else(|e| {
-                error!("Failed to clear screen on exit: {e}");
-            });
+        self.clear_screen().unwrap_or_else(|e| {
+            error!("Failed to clear screen on exit: {e}");
+        });
         self.disable_raw_mode();
     }
 }
@@ -190,7 +205,7 @@ fn main() -> VoidResult {
     loop {
         ked.refresh_screen()?;
         if let Err(e) = ked.process_key() {
-            ked.clear_screen().and_then(|_| ked.flush_buf())?;
+            ked.clear_screen()?;
             if e.is_quit() {
                 // just a simple quit
             } else {
