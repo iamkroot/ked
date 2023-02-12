@@ -2,15 +2,17 @@
 
 mod error;
 
-use std::io::{self, Read, StdinLock, StdoutLock, Write};
-use std::os::fd::RawFd;
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::os::fd::{FromRawFd, RawFd};
 
 use log::error;
 use termios::{self, Termios};
 
 use crate::error::{KError, KResult, VoidResult};
 
-const STDIN_FD: RawFd = 0;
+const STDIN_FD: RawFd = libc::STDIN_FILENO;
+const STDOUT_FD: RawFd = libc::STDOUT_FILENO;
 
 fn enable_raw_mode() -> VoidResult {
     use termios::{
@@ -32,20 +34,74 @@ const fn ctrl_key(k: u8) -> u8 {
     k & 0b0001_1111
 }
 
+#[derive(Debug)]
+#[repr(C)]
+struct TermSize {
+    row: libc::c_ushort,
+    col: libc::c_ushort,
+    x: libc::c_ushort,
+    y: libc::c_ushort,
+}
+
 struct Ked {
-    stdin: StdinLock<'static>,
-    stdout: StdoutLock<'static>,
+    stdin: File,
+    stdout: File,
     orig_termios: Termios,
+    screen_size: TermSize,
+}
+
+mod escape_seq {
+    pub(crate) const CLEAR: &[u8] = b"2J";
+    pub(crate) const RESET_CURSOR: &[u8] = b"1;1H";
+
+    #[allow(unused_macros)]
+    macro_rules! move_cursor {
+        ($row: literal, $col: literal) => {{
+            const ROW: u16 = $row;
+            const COL: u16 = $col;
+            const S_ROW: &str = const_str::to_str!(ROW);
+            const S_COL: &str = const_str::to_str!(COL);
+            const B_ROW: [u8; S_ROW.len()] = const_str::to_byte_array!(S_ROW);
+            const B_COL: [u8; S_COL.len()] = const_str::to_byte_array!(S_COL);
+            const_str::concat_bytes!(B_ROW, b";", B_COL, b"H")
+        }};
+    }
+}
+
+macro_rules! esc_write {
+    ($ked: ident, $val: ident) => {
+        $ked.stdout
+            .write_all(const_str::concat_bytes!(b"\x1b[", escape_seq::$val))
+    };
+    ($ked: ident, $val: expr) => {
+        $ked.stdout
+            .write_all(const_str::concat_bytes!(b"\x1b[", $val))
+    };
 }
 
 impl Ked {
-    fn new() -> io::Result<Self> {
+    fn new() -> KResult<Self> {
         Ok(Ked {
-            stdin: std::io::stdin().lock(),
-            stdout: std::io::stdout().lock(),
+            stdin: unsafe { File::from_raw_fd(STDIN_FD) },
+            stdout: unsafe { File::from_raw_fd(STDOUT_FD) },
             orig_termios: Termios::from_fd(STDIN_FD)?,
+            screen_size: Self::get_window_size()?,
         })
     }
+
+    fn get_window_size() -> KResult<TermSize> {
+        unsafe {
+            let mut size: TermSize = std::mem::zeroed();
+            let res = libc::ioctl(STDOUT_FD, libc::TIOCGWINSZ, &mut size as *mut _);
+            if res == -1 {
+                Err(io::Error::last_os_error().into())
+            } else {
+                log::trace!("size: {size:?}");
+                Ok(size)
+            }
+        }
+    }
+
     fn disable_raw_mode(&self) {
         termios::tcsetattr(STDIN_FD, termios::TCSAFLUSH, &self.orig_termios).unwrap_or_else(|e| {
             error!("Failed to disable raw mode: {e}");
@@ -54,35 +110,55 @@ impl Ked {
     fn read_key(&mut self) -> KResult<u8> {
         let mut c: u8 = 0;
         let buf = std::slice::from_mut(&mut c);
-        self.stdin.read(buf)?;
+        let _ = self.stdin.read(buf)?;
         Ok(c)
     }
     fn process_key(&mut self) -> VoidResult {
         let c = self.read_key()?;
-        log::trace!("Key {c}");
+        log::trace!(target: "keytrace", "Key {c}");
         match c {
             k if k == ctrl_key(b'q') => return Err(KError::Quit),
             _ => {
                 let ch: char = c.into();
                 if ch.is_ascii_control() {
-                    println!("{c}\r");
+                    write!(self.stdout, "{c}\r")?;
                 } else {
-                    println!("{c} ('{ch}')\r");
+                    write!(self.stdout, "{c} ('{ch}')\r")?;
                 }
             }
         }
         Ok(())
     }
 
+    fn clear_screen(&mut self) -> VoidResult {
+        esc_write!(self, CLEAR)?;
+        esc_write!(self, RESET_CURSOR)?;
+        Ok(())
+    }
+
     fn refresh_screen(&mut self) -> VoidResult {
-        self.stdout.write_all(b"\x1b[2J")?;
-        self.stdout.write_all(b"\x1b[H")?;
+        self.clear_screen()?;
+        self.draw_rows()?;
+        esc_write!(self, RESET_CURSOR)?;
+        Ok(())
+    }
+
+    fn draw_rows(&mut self) -> VoidResult {
+        for i in 0..self.screen_size.row {
+            write!(self.stdout, "~{i}")?;
+            if i < self.screen_size.row - 1 {
+                self.stdout.write_all(b"\r\n")?;
+            }
+        }
         Ok(())
     }
 }
 
 impl Drop for Ked {
     fn drop(&mut self) {
+        self.clear_screen().unwrap_or_else(|e| {
+            error!("Failed to clear screen on exit: {e}");
+        });
         self.disable_raw_mode();
     }
 }
@@ -94,6 +170,7 @@ fn main() -> VoidResult {
         .open("ked.log")?;
     env_logger::builder()
         .filter_level(log::LevelFilter::Debug)
+        .filter_module("keytrace", log::LevelFilter::Info)
         .parse_default_env()
         .target(env_logger::Target::Pipe(Box::new(log_file)))
         .init();
@@ -103,14 +180,16 @@ fn main() -> VoidResult {
     loop {
         ked.refresh_screen()?;
         if let Err(e) = ked.process_key() {
+            ked.clear_screen()?;
             if e.is_quit() {
                 // just a simple quit
-                break;
+            } else {
+                // need to reset the termios before printing errors.
+                drop(ked);
+                log::error!("Error! {e}");
             }
-            log::error!("Error! {e}");
             break;
         }
     }
-    drop(ked);
     Ok(())
 }
