@@ -8,7 +8,7 @@ const STDIN_FD: RawFd = 0;
 fn enable_raw_mode() -> io::Result<()> {
     let mut t = termios::Termios::from_fd(STDIN_FD)?;
     termios::tcgetattr(STDIN_FD, &mut t)?;
-    t.c_lflag &= !termios::ECHO;
+    t.c_lflag &= !(termios::ECHO | termios::ICANON);
     termios::tcsetattr(STDIN_FD, termios::TCSAFLUSH, &t)?;
     Ok(())
 }
@@ -43,6 +43,13 @@ fn main() -> io::Result<()> {
     // let lock = stdin.lock();
     let mut buf = [0; 1];
     while stdin.read(&mut buf)? == 1 && buf[0] != b'q' {
+        // let c = buf[0];
+        let c = char::from(buf[0]);
+        if c.is_ascii_control() {
+            println!("{}", buf[0]);
+        } else {
+            println!("{} ('{c}')", buf[0]);
+        }
         // read
     }
     Ok(())
