@@ -372,9 +372,16 @@ impl Ked {
         }
         let end_len = self.buf.len();
 
-        let trailing_space = self.screen_size.col as usize - (end_len - start_len);
-        self.buf
-            .extend(std::iter::repeat(b' ').take(trailing_space));
+        // format the rstatus into a buf first
+        let rstatus: &mut [u8] = &mut [0u8; 40];
+        let mut cur = std::io::Cursor::new(rstatus);
+        write!(cur, "{}/{}", self.cur.y + 1, self.rows.len())?;
+        let num_rbytes = cur.position() as usize;
+        let rstatus = cur.into_inner();
+
+        let sep_space = self.screen_size.col as usize - (end_len - start_len) - num_rbytes;
+        self.buf.extend(std::iter::repeat(b' ').take(sep_space));
+        self.buf.extend(rstatus.iter());
         esc_write!(self.buf, NORMAL_COLOR)?;
         Ok(())
     }
