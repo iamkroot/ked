@@ -207,11 +207,12 @@ impl Ked {
             | keys::END => self.move_cursor(c),
             _ => {
                 let ch: char = char::from_u32(c).expect("invalid char");
-                if ch.is_ascii_control() {
-                    write!(self.buf, "{c}\r")?;
-                } else {
-                    write!(self.buf, "{c} ('{ch}')\r")?;
-                }
+                self.insert_char(ch);
+                // if ch.is_ascii_control() {
+                //     write!(self.buf, "{c}\r")?;
+                // } else {
+                //     write!(self.buf, "{c} ('{ch}')\r")?;
+                // }
             }
         }
         Ok(())
@@ -394,6 +395,55 @@ impl Ked {
         self.status_msg.1 = Instant::now();
     }
 
+    fn get_render(&self, row_idx: usize) -> String {
+        let line = &self.rows[row_idx];
+        let mut out = String::with_capacity(
+            line.chars()
+                .map(|c| if c == '\t' { TAB_STOP } else { 1 })
+                .sum(),
+        );
+        line.chars().fold(0, |acc, c| {
+            acc + match c {
+                '\t' => {
+                    let extra_spaces = TAB_STOP - (acc % TAB_STOP);
+                    out.extend(iter::repeat(' ').take(extra_spaces));
+                    extra_spaces
+                }
+                _ => {
+                    out.push(c);
+                    1
+                }
+            }
+        });
+        out
+    }
+
+    fn insert_char_at_pos(&mut self, ch: char, row_idx: usize, col: usize) {
+        let row = &mut self.rows[row_idx];
+        log::trace!(target: "edit::insert", "Old row: '{row}'");
+        if col > row.len() {
+            log::warn!("Trying to insert char outside row!");
+            log::debug!("Line: '{row}'. col: {col}");
+            return;
+        }
+        row.reserve(1);
+        row.insert(col, ch);
+        log::trace!(target: "edit::insert", "New row: '{row}'");
+        self.render_rows[row_idx] = self.get_render(row_idx);
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        log::trace!(target: "edit::insert", "Inserting '{ch}' at {:?}", self.cur);
+        if self.cur.y >= self.rows.len() {
+            let new_strs =
+                std::iter::repeat_with(String::new).take(self.rows.len() - self.cur.y + 1);
+            self.rows.extend(new_strs.clone());
+            self.render_rows.extend(new_strs);
+        }
+        self.insert_char_at_pos(ch, self.cur.y, self.cur.x);
+        self.cur.x += 1;
+    }
+
     fn open(&mut self, path: impl AsRef<Path>) -> VoidResult {
         let f = std::fs::OpenOptions::new()
             .read(true)
@@ -401,30 +451,8 @@ impl Ked {
             .open(path.as_ref())?;
         let reader = BufReader::new(f);
         self.rows = reader.lines().collect::<Result<Vec<_>, _>>()?;
-        self.render_rows = self
-            .rows
-            .iter()
-            .map(|line| {
-                let mut out = String::with_capacity(
-                    line.chars()
-                        .map(|c| if c == '\t' { TAB_STOP } else { 1 })
-                        .sum(),
-                );
-                line.chars().fold(0, |acc, c| {
-                    acc + match c {
-                        '\t' => {
-                            let extra_spaces = TAB_STOP - (acc % TAB_STOP);
-                            out.extend(iter::repeat(' ').take(extra_spaces));
-                            extra_spaces
-                        }
-                        _ => {
-                            out.push(c);
-                            1
-                        }
-                    }
-                });
-                out
-            })
+        self.render_rows = (0..self.rows.len())
+            .map(|row_idx| self.get_render(row_idx))
             .collect();
         self.filepath = Some(path.as_ref().to_path_buf());
         log::trace!(
