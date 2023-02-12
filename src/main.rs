@@ -2,7 +2,7 @@
 
 mod error;
 
-use std::io::{self, Read, StdinLock};
+use std::io::{self, Read, StdinLock, StdoutLock, Write};
 use std::os::fd::RawFd;
 
 use log::error;
@@ -34,6 +34,7 @@ const fn ctrl_key(k: u8) -> u8 {
 
 struct Ked {
     stdin: StdinLock<'static>,
+    stdout: StdoutLock<'static>,
     orig_termios: Termios,
 }
 
@@ -41,6 +42,7 @@ impl Ked {
     fn new() -> io::Result<Self> {
         Ok(Ked {
             stdin: std::io::stdin().lock(),
+            stdout: std::io::stdout().lock(),
             orig_termios: Termios::from_fd(STDIN_FD)?,
         })
     }
@@ -71,6 +73,12 @@ impl Ked {
         }
         Ok(())
     }
+
+    fn refresh_screen(&mut self) -> VoidResult {
+        self.stdout.write_all(b"\x1b[2J")?;
+        self.stdout.write_all(b"\x1b[H")?;
+        Ok(())
+    }
 }
 
 impl Drop for Ked {
@@ -93,6 +101,7 @@ fn main() -> VoidResult {
     let mut ked = Ked::new()?;
     enable_raw_mode().expect("failed to enable raw");
     loop {
+        ked.refresh_screen()?;
         if let Err(e) = ked.process_key() {
             if e.is_quit() {
                 // just a simple quit
