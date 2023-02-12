@@ -45,19 +45,6 @@ mod escape_seq {
     pub(crate) const RESET_CURSOR: &[u8] = b"1;1H";
     pub(crate) const INVERT_COLOR: &[u8] = b"7m";
     pub(crate) const NORMAL_COLOR: &[u8] = b"m";
-
-    #[allow(unused_macros)]
-    macro_rules! move_cursor {
-        ($row: literal, $col: literal) => {{
-            const ROW: u16 = $row;
-            const COL: u16 = $col;
-            const S_ROW: &str = const_str::to_str!(ROW);
-            const S_COL: &str = const_str::to_str!(COL);
-            const B_ROW: [u8; S_ROW.len()] = const_str::to_byte_array!(S_ROW);
-            const B_COL: [u8; S_COL.len()] = const_str::to_byte_array!(S_COL);
-            const_str::concat_bytes!(B_ROW, b";", B_COL, b"H")
-        }};
-    }
 }
 
 mod keys {
