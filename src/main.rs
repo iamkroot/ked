@@ -58,12 +58,10 @@ struct Ked {
     buf: Vec<u8>,
     cur: Pos,
     rows: Vec<String>,
+    rowoff: u16,
 }
 
 mod escape_seq {
-    use crate::error::VoidResult;
-    use crate::Pos;
-
     pub(crate) const CLEAR: &[u8] = b"2J";
     pub(crate) const CLEAR_TRAIL_LINE: &[u8] = b"K";
     pub(crate) const HIDE_CURSOR: &[u8] = b"?25l";
@@ -81,17 +79,6 @@ mod escape_seq {
             const B_COL: [u8; S_COL.len()] = const_str::to_byte_array!(S_COL);
             const_str::concat_bytes!(B_ROW, b";", B_COL, b"H")
         }};
-    }
-
-    impl Pos {
-        /// Write into `buf` the escape sequence needed to move cursor to `self`.
-        ///
-        /// * Assumes `self` is 0-indexed, whereas the terminal cursor needs to be 1-indexed.
-        /// * Also transforms `self.y` into `row` and `self.x` into col.
-        pub(crate) fn write_move(&self, buf: &mut dyn std::io::Write) -> VoidResult {
-            write!(buf, "\x1b[{};{}H", self.y + 1, self.x + 1)?;
-            Ok(())
-        }
     }
 }
 
@@ -125,7 +112,8 @@ impl Ked {
             // assume that we'll need to write at least these many bytes
             buf: Vec::with_capacity(48),
             cur: Default::default(),
-            rows: Vec::with_capacity(24),
+            rows: Vec::new(),
+            rowoff: 0,
         })
     }
 
@@ -186,11 +174,16 @@ impl Ked {
             k if k == ctrl_key(b'q') as _ => return Err(KError::Quit),
             // probably need to accomodate scrolling in the future
             keys::UP => self.cur.y = self.cur.y.saturating_sub(1),
-            keys::DOWN => self.cur.y = (self.cur.y + 1).min(self.screen_size.row - 1),
+            keys::DOWN => {
+                self.cur.y = (self.cur.y + 1).min((self.rows.len().saturating_sub(1)) as u16)
+            }
             keys::LEFT => self.cur.x = self.cur.x.saturating_sub(1),
             keys::RIGHT => self.cur.x = (self.cur.x + 1).min(self.screen_size.col - 1),
             keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row - 1),
-            keys::PGDOWN => self.cur.y = self.screen_size.row - 1,
+            keys::PGDOWN => {
+                self.cur.y = (self.cur.y + self.screen_size.row - 1)
+                    .min(self.rows.len().saturating_sub(1) as u16)
+            }
             keys::HOME => self.cur.x = 0,
             keys::END => self.cur.x = self.screen_size.col - 1,
             _ => {
@@ -213,8 +206,16 @@ impl Ked {
         Ok(())
     }
 
+    fn scroll_screen(&mut self) {
+        self.rowoff = self.rowoff.min(self.cur.y);
+        if self.cur.y >= self.rowoff + self.screen_size.row {
+            self.rowoff = self.cur.y.saturating_sub(self.screen_size.row) + 1;
+        }
+    }
+
     fn refresh_screen(&mut self) -> VoidResult {
         self.buf.clear();
+        self.scroll_screen();
         esc_write!(self.buf, HIDE_CURSOR)?;
         esc_write!(self.buf, RESET_CURSOR)?;
         self.draw_rows()?;
@@ -225,8 +226,17 @@ impl Ked {
     }
 
     /// Write into `self.buf` the escape sequence needed to move cursor to `self.cur`.
+    ///
+    /// * Assumes `self.cur` is 0-indexed, whereas the terminal cursor needs to be 1-indexed.
+    /// * Also transforms `self.cur.y` into `row` and `self.cur.x` into `col`.
     fn write_move_cur(&mut self) -> VoidResult {
-        self.cur.write_move(&mut self.buf)
+        write!(
+            self.buf,
+            "\x1b[{};{}H",
+            self.cur.y - self.rowoff + 1,
+            self.cur.x + 1
+        )?;
+        Ok(())
     }
 
     fn flush_buf(&mut self) -> VoidResult {
@@ -236,7 +246,8 @@ impl Ked {
 
     fn draw_rows(&mut self) -> VoidResult {
         for y in 0..self.screen_size.row {
-            if y as usize >= self.rows.len() {
+            let filerow = (y + self.rowoff) as usize;
+            if filerow >= self.rows.len() {
                 if self.rows.is_empty() && y == self.screen_size.row / 3 {
                     write!(
                         self.buf,
@@ -248,7 +259,7 @@ impl Ked {
                     write!(self.buf, "~")?;
                 }
             } else {
-                let row = &self.rows[y as usize];
+                let row = &self.rows[filerow];
                 // need to clip manually. using std::fmt's width option causes line wraps.
                 let clipped = &row[..row.len().min(self.screen_size.col as usize)];
                 write!(self.buf, "{clipped}")?;
