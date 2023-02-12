@@ -4,8 +4,10 @@ mod error;
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::iter;
 use std::os::fd::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use log::error;
 use termios::{self, Termios};
@@ -122,6 +124,7 @@ struct Ked {
     rowoff: usize,
     coloff: usize,
     filepath: Option<PathBuf>,
+    status_msg: (String, Instant),
 }
 
 const TAB_STOP: usize = 4;
@@ -130,8 +133,8 @@ impl Ked {
     fn new() -> KResult<Self> {
         let screen_size = {
             let mut s = Self::get_window_size()?;
-            // leave one row for the status bar
-            s.row -= 1;
+            // leave one row for the status bar, and another for message
+            s.row -= 2;
             s
         };
         Ok(Ked {
@@ -148,6 +151,7 @@ impl Ked {
             render_rows: Vec::new(),
             render_pos_x: 0,
             filepath: None,
+            status_msg: (Default::default(), Instant::now()),
         })
     }
 
@@ -299,6 +303,8 @@ impl Ked {
         esc_write!(self.buf, RESET_CURSOR)?;
         self.draw_rows()?;
         self.draw_status_bar()?;
+        write!(self.buf, "\r\n")?;
+        self.draw_status_message()?;
         self.write_move_cur()?;
         esc_write!(self.buf, UNHIDE_CURSOR)?;
         self.flush_buf()?;
@@ -380,10 +386,25 @@ impl Ked {
         let rstatus = cur.into_inner();
 
         let sep_space = self.screen_size.col as usize - (end_len - start_len) - num_rbytes;
-        self.buf.extend(std::iter::repeat(b' ').take(sep_space));
+        self.buf.extend(iter::repeat(b' ').take(sep_space));
         self.buf.extend(rstatus.iter());
         esc_write!(self.buf, NORMAL_COLOR)?;
         Ok(())
+    }
+
+    fn draw_status_message(&mut self) -> VoidResult {
+        let n = self.screen_size.col as usize;
+        if !self.status_msg.0.is_empty() && self.status_msg.1.elapsed() < Duration::from_secs(5) {
+            write_trim!(self.buf, &self.status_msg.0, n)?;
+        } else {
+            self.buf.extend(iter::repeat(b' ').take(n));
+        }
+        Ok(())
+    }
+
+    fn set_status_message(&mut self, fmt_args: std::fmt::Arguments) {
+        self.status_msg.0 = fmt_args.to_string();
+        self.status_msg.1 = Instant::now();
     }
 
     fn open(&mut self, path: impl AsRef<Path>) -> VoidResult {
@@ -406,7 +427,7 @@ impl Ked {
                     acc + match c {
                         '\t' => {
                             let extra_spaces = TAB_STOP - (acc % TAB_STOP);
-                            out.extend(std::iter::repeat(' ').take(extra_spaces));
+                            out.extend(iter::repeat(' ').take(extra_spaces));
                             extra_spaces
                         }
                         _ => {
@@ -453,6 +474,7 @@ fn main() -> VoidResult {
     if let Some(path) = std::env::args().nth(1) {
         ked.open(path)?;
     }
+    ked.set_status_message(format_args!("HELP: Press Ctrl+q to quit"));
     enable_raw_mode().expect("failed to enable raw");
     loop {
         ked.refresh_screen()?;
