@@ -1,12 +1,14 @@
 #![feature(io_error_downcast)]
 
-use std::error::Error;
-use std::fmt::Display;
+mod error;
+
 use std::io::{self, Read, StdinLock};
 use std::os::fd::RawFd;
 
 use log::error;
 use termios::{self, Termios};
+
+use crate::error::{KError, KResult, VoidResult};
 
 const STDIN_FD: RawFd = 0;
 
@@ -29,38 +31,6 @@ fn enable_raw_mode() -> VoidResult {
 const fn ctrl_key(k: u8) -> u8 {
     k & 0b0001_1111
 }
-
-#[derive(Debug)]
-enum KError {
-    Io(io::Error),
-    Quit,
-    #[allow(dead_code)]
-    SimpleMessage(&'static str),
-}
-
-impl Display for KError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            KError::Io(e) => write!(f, "io: {e}"),
-            KError::Quit => write!(f, "quit!"),
-            KError::SimpleMessage(msg) => write!(f, "error: {msg}"),
-        }
-    }
-}
-
-impl Error for KError {}
-
-impl From<io::Error> for KError {
-    fn from(value: io::Error) -> Self {
-        value
-            .downcast::<Self>()
-            .map(|b| *b)
-            .unwrap_or_else(Self::Io)
-    }
-}
-
-type KResult<T> = Result<T, KError>;
-type VoidResult = Result<(), KError>;
 
 struct Ked {
     stdin: StdinLock<'static>,
@@ -101,9 +71,6 @@ impl Ked {
         }
         Ok(())
     }
-    fn refresh_screen(&mut self) -> VoidResult {
-        todo!()
-    }
 }
 
 impl Drop for Ked {
@@ -127,7 +94,7 @@ fn main() -> VoidResult {
     enable_raw_mode().expect("failed to enable raw");
     loop {
         if let Err(e) = ked.process_key() {
-            if core::mem::discriminant(&e) == core::mem::discriminant(&KError::Quit) {
+            if e.is_quit() {
                 // just a simple quit
                 break;
             }
