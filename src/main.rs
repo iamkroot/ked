@@ -6,13 +6,17 @@ use termios::{self, Termios};
 
 const STDIN_FD: RawFd = 0;
 fn enable_raw_mode() -> io::Result<()> {
+    use termios::{
+        BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST, VMIN, VTIME,
+    };
     let mut t = termios::Termios::from_fd(STDIN_FD)?;
-    use termios::{BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST};
     termios::tcgetattr(STDIN_FD, &mut t)?;
     t.c_iflag &= !(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
     t.c_oflag &= !(OPOST);
     t.c_cflag |= CS8;
     t.c_lflag &= !(ECHO | ICANON | IEXTEN | ISIG);
+    t.c_cc[VMIN] = 0;
+    t.c_cc[VTIME] = 1;
     termios::tcsetattr(STDIN_FD, termios::TCSAFLUSH, &t)?;
     Ok(())
 }
@@ -54,12 +58,17 @@ fn main() -> io::Result<()> {
     let cleanup = Cleanup::new()?;
     enable_raw_mode().expect("failed to enable raw");
     let mut buf = [0; 1];
-    while stdin.read(&mut buf)? == 1 && buf[0] != b'q' {
+    loop {
+        buf[0] = 0;
+        stdin.read(&mut buf)?;
         let c = char::from(buf[0]);
         if c.is_ascii_control() {
             println!("{}\r", buf[0]);
         } else {
             println!("{} ('{c}')\r", buf[0]);
+        }
+        if c == 'q' {
+            break;
         }
     }
     drop(cleanup);
