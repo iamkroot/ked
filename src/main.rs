@@ -5,7 +5,7 @@ mod error;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use log::error;
 use termios::{self, Termios};
@@ -41,6 +41,8 @@ mod escape_seq {
     pub(crate) const HIDE_CURSOR: &[u8] = b"?25l";
     pub(crate) const UNHIDE_CURSOR: &[u8] = b"?25h";
     pub(crate) const RESET_CURSOR: &[u8] = b"1;1H";
+    pub(crate) const INVERT_COLOR: &[u8] = b"7m";
+    pub(crate) const NORMAL_COLOR: &[u8] = b"m";
 
     #[allow(unused_macros)]
     macro_rules! move_cursor {
@@ -76,6 +78,22 @@ macro_rules! esc_write {
     };
 }
 
+/// Trims the value with "..." if it exceeds `max_width`
+macro_rules! write_trim {
+    ($file: expr, $value: expr, $max_width: tt) => {
+        write!(
+            $file,
+            "{}{}",
+            if $value.len() > $max_width {
+                &$value[..$max_width - 3]
+            } else {
+                $value
+            },
+            if $value.len() > $max_width { "..." } else { "" }
+        )
+    };
+}
+
 #[derive(Debug)]
 #[repr(C)]
 struct TermSize {
@@ -103,17 +121,24 @@ struct Ked {
     render_pos_x: usize,
     rowoff: usize,
     coloff: usize,
+    filepath: Option<PathBuf>,
 }
 
 const TAB_STOP: usize = 4;
 
 impl Ked {
     fn new() -> KResult<Self> {
+        let screen_size = {
+            let mut s = Self::get_window_size()?;
+            // leave one row for the status bar
+            s.row -= 1;
+            s
+        };
         Ok(Ked {
             stdin: unsafe { File::from_raw_fd(STDIN_FD) },
             stdout: unsafe { File::from_raw_fd(STDOUT_FD) },
             orig_termios: Termios::from_fd(STDIN_FD)?,
-            screen_size: Self::get_window_size()?,
+            screen_size,
             // assume that we'll need to write at least these many bytes
             buf: Vec::with_capacity(48),
             cur: Default::default(),
@@ -122,6 +147,7 @@ impl Ked {
             coloff: 0,
             render_rows: Vec::new(),
             render_pos_x: 0,
+            filepath: None,
         })
     }
 
@@ -272,6 +298,7 @@ impl Ked {
         esc_write!(self.buf, HIDE_CURSOR)?;
         esc_write!(self.buf, RESET_CURSOR)?;
         self.draw_rows()?;
+        self.draw_status_bar()?;
         self.write_move_cur()?;
         esc_write!(self.buf, UNHIDE_CURSOR)?;
         self.flush_buf()?;
@@ -322,10 +349,33 @@ impl Ked {
                 }
             }
             esc_write!(self.buf, CLEAR_TRAIL_LINE)?;
-            if y < self.screen_size.row as usize - 1 {
-                write!(self.buf, "\r\n")?;
-            }
+            write!(self.buf, "\r\n")?;
         }
+        Ok(())
+    }
+
+    fn draw_status_bar(&mut self) -> VoidResult {
+        esc_write!(self.buf, INVERT_COLOR)?;
+        // write file name and number of lines
+        let name = self
+            .filepath
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("[No name]");
+        const MAX_NAME_WIDTH: usize = 20;
+
+        let start_len = self.buf.len();
+        write_trim!(self.buf, name, MAX_NAME_WIDTH)?;
+        if self.filepath.is_some() {
+            write!(self.buf, " - {} lines", self.rows.len())?;
+        }
+        let end_len = self.buf.len();
+
+        let trailing_space = self.screen_size.col as usize - (end_len - start_len);
+        self.buf
+            .extend(std::iter::repeat(b' ').take(trailing_space));
+        esc_write!(self.buf, NORMAL_COLOR)?;
         Ok(())
     }
 
@@ -361,6 +411,7 @@ impl Ked {
                 out
             })
             .collect();
+        self.filepath = Some(path.as_ref().to_path_buf());
         log::trace!(
             "Opened file: {} with {} lines.",
             path.as_ref().display(),
