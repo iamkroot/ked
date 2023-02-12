@@ -59,6 +59,8 @@ struct Ked {
     cur: Pos,
     rows: Vec<String>,
     rowoff: usize,
+    coloff: usize,
+    max_line_length: Option<usize>,
 }
 
 mod escape_seq {
@@ -114,6 +116,8 @@ impl Ked {
             cur: Default::default(),
             rows: Vec::new(),
             rowoff: 0,
+            coloff: 0,
+            max_line_length: None,
         })
     }
 
@@ -176,7 +180,12 @@ impl Ked {
             keys::UP => self.cur.y = self.cur.y.saturating_sub(1),
             keys::DOWN => self.cur.y = (self.cur.y + 1).min(self.rows.len().saturating_sub(1)),
             keys::LEFT => self.cur.x = self.cur.x.saturating_sub(1),
-            keys::RIGHT => self.cur.x = (self.cur.x + 1).min(self.screen_size.col as usize - 1),
+            keys::RIGHT => {
+                self.cur.x = (self.cur.x + 1).min(
+                    self.max_line_length
+                        .unwrap_or(self.screen_size.col as usize - 1),
+                )
+            }
             keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row as usize - 1),
             keys::PGDOWN => {
                 self.cur.y = (self.cur.y + self.screen_size.row as usize - 1)
@@ -209,6 +218,10 @@ impl Ked {
         if self.cur.y >= self.rowoff + self.screen_size.row as usize {
             self.rowoff = self.cur.y.saturating_sub(self.screen_size.row as usize) + 1;
         }
+        self.coloff = self.coloff.min(self.cur.x);
+        if self.cur.x >= self.coloff + self.screen_size.col as usize {
+            self.coloff = self.cur.x.saturating_sub(self.screen_size.col as usize) + 1;
+        }
     }
 
     fn refresh_screen(&mut self) -> VoidResult {
@@ -232,7 +245,7 @@ impl Ked {
             self.buf,
             "\x1b[{};{}H",
             self.cur.y - self.rowoff + 1,
-            self.cur.x + 1
+            self.cur.x - self.coloff + 1
         )?;
         Ok(())
     }
@@ -246,7 +259,7 @@ impl Ked {
         for y in 0..self.screen_size.row as usize {
             let filerow = y + self.rowoff;
             if filerow >= self.rows.len() {
-                if self.rows.is_empty() && y == self.screen_size.row as usize/ 3 {
+                if self.rows.is_empty() && y == self.screen_size.row as usize / 3 {
                     write!(
                         self.buf,
                         "{:^width$}",
@@ -258,9 +271,13 @@ impl Ked {
                 }
             } else {
                 let row = &self.rows[filerow];
-                // need to clip manually. using std::fmt's width option causes line wraps.
-                let clipped = &row[..row.len().min(self.screen_size.col as usize)];
-                write!(self.buf, "{clipped}")?;
+                // only show the line if it is visible region
+                if self.coloff <= row.len() {
+                    // need to clip manually. using std::fmt's width option causes line wraps.
+                    let clip_end = row.len().min(self.coloff + self.screen_size.col as usize);
+                    let clipped = &row[self.coloff..clip_end];
+                    write!(self.buf, "{clipped}")?;
+                }
             }
             esc_write!(self.buf, CLEAR_TRAIL_LINE)?;
             if y < self.screen_size.row as usize - 1 {
@@ -277,10 +294,12 @@ impl Ked {
             .open(path.as_ref())?;
         let reader = BufReader::new(f);
         self.rows = reader.lines().collect::<Result<Vec<_>, _>>()?;
+        self.max_line_length = Some(self.rows.iter().fold(0, |max_len, l| l.len().max(max_len)));
         log::trace!(
-            "Opened file: {} with {} lines.",
+            "Opened file: {} with {} lines and max_line_length {}.",
             path.as_ref().display(),
-            self.rows.len()
+            self.rows.len(),
+            self.max_line_length.unwrap(),
         );
         Ok(())
     }
