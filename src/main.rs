@@ -93,6 +93,17 @@ mod escape_seq {
     }
 }
 
+mod keys {
+    pub(crate) const UP: u32 = 1000;
+    pub(crate) const DOWN: u32 = 1001;
+    pub(crate) const LEFT: u32 = 1002;
+    pub(crate) const RIGHT: u32 = 1003;
+    pub(crate) const PGUP: u32 = 1004;
+    pub(crate) const PGDOWN: u32 = 1005;
+    pub(crate) const HOME: u32 = 1006;
+    pub(crate) const END: u32 = 1007;
+}
+
 macro_rules! esc_write {
     ($file: expr, $val: ident) => {
         $file.write_all(const_str::concat_bytes!(b"\x1b[", escape_seq::$val))
@@ -133,25 +144,62 @@ impl Ked {
             error!("Failed to disable raw mode: {e}");
         });
     }
-    fn read_key(&mut self) -> KResult<u8> {
+    fn read_key(&mut self) -> KResult<u32> {
         let mut c: u8 = 0;
-        let buf = std::slice::from_mut(&mut c);
-        let _ = self.stdin.read(buf)?;
-        Ok(c)
+        let _ = self.stdin.read(std::slice::from_mut(&mut c))?;
+        let key: u32 = if c == b'\x1b' {
+            let _ = self.stdin.read(std::slice::from_mut(&mut c))?;
+            if c == b'[' {
+                let _ = self.stdin.read(std::slice::from_mut(&mut c))?;
+                match c {
+                    b'A' => keys::UP,
+                    b'B' => keys::DOWN,
+                    b'C' => keys::RIGHT,
+                    b'D' => keys::LEFT,
+                    b'H' => keys::HOME,
+                    b'F' => keys::END,
+                    b'0'..=b'9' => {
+                        let mut last: u8 = 0;
+                        let _ = self.stdin.read(std::slice::from_mut(&mut last))?;
+                        if last == b'~' {
+                            match c {
+                                b'1' | b'7' => keys::HOME,
+                                b'5' => keys::PGUP,
+                                b'6' => keys::PGDOWN,
+                                b'4' | b'8' => keys::HOME,
+                                _ => b'\x1b' as _,
+                            }
+                        } else {
+                            b'\x1b' as _
+                        }
+                    }
+                    _ => b'\x1b' as _,
+                }
+            } else {
+                b'\x1b' as _
+            }
+        } else {
+            c as _
+        };
+        Ok(key)
     }
 
     fn process_key(&mut self) -> VoidResult {
         let c = self.read_key()?;
         log::trace!(target: "keytrace", "Key {c}");
         match c {
-            k if k == ctrl_key(b'q') => return Err(KError::Quit),
-            b'w' => self.cur.y = self.cur.y.saturating_sub(1),
-            b's' => self.cur.y = self.cur.y.saturating_add(1),
-            b'a' => self.cur.x = self.cur.x.saturating_sub(1),
-            b'd' => self.cur.x = self.cur.x.saturating_add(1),
-
+            k if k == ctrl_key(b'q') as _ => return Err(KError::Quit),
+            // probably need to accomodate scrolling in the future
+            keys::UP => self.cur.y = self.cur.y.saturating_sub(1),
+            keys::DOWN => self.cur.y = (self.cur.y + 1).min(self.screen_size.row - 1),
+            keys::LEFT => self.cur.x = self.cur.x.saturating_sub(1),
+            keys::RIGHT => self.cur.x = (self.cur.x + 1).min(self.screen_size.col -1),
+            keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row - 1),
+            keys::PGDOWN => self.cur.y = self.screen_size.row - 1,
+            keys::HOME => self.cur.x = 0,
+            keys::END => self.cur.x = self.screen_size.col - 1,
             _ => {
-                let ch: char = c.into();
+                let ch: char = char::from_u32(c).expect("invalid char");
                 if ch.is_ascii_control() {
                     write!(self.buf, "{c}\r")?;
                 } else {
