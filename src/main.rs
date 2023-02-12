@@ -3,8 +3,9 @@
 mod error;
 
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
+use std::path::Path;
 
 use log::error;
 use termios::{self, Termios};
@@ -56,6 +57,7 @@ struct Ked {
     screen_size: TermSize,
     buf: Vec<u8>,
     cur: Pos,
+    rows: Vec<String>,
 }
 
 mod escape_seq {
@@ -123,6 +125,7 @@ impl Ked {
             // assume that we'll need to write at least these many bytes
             buf: Vec::with_capacity(48),
             cur: Default::default(),
+            rows: Vec::with_capacity(24),
         })
     }
 
@@ -155,24 +158,22 @@ impl Ked {
             }
         }
         let key: u32 = match &buf[0..2] {
-            b"\x1b[" => {
-                match &buf[2..n] {
-                    b"A" => keys::UP,
-                    b"B" => keys::DOWN,
-                    b"C" => keys::RIGHT,
-                    b"D" => keys::LEFT,
-                    b"H" => keys::HOME,
-                    b"F" => keys::END,
-                    b"1~" | b"7~" => keys::HOME,
-                    b"4~" | b"8~" => keys::END,
-                    b"5~" => keys::PGUP,
-                    b"6~" => keys::PGDOWN,
-                    _ => {
-                        log::warn!("Weird data on stdin: {buf:?}");
-                        b'\x1b' as _
-                    }
+            b"\x1b[" => match &buf[2..n] {
+                b"A" => keys::UP,
+                b"B" => keys::DOWN,
+                b"C" => keys::RIGHT,
+                b"D" => keys::LEFT,
+                b"H" => keys::HOME,
+                b"F" => keys::END,
+                b"1~" | b"7~" => keys::HOME,
+                b"4~" | b"8~" => keys::END,
+                b"5~" => keys::PGUP,
+                b"6~" => keys::PGDOWN,
+                _ => {
+                    log::warn!("Weird data on stdin: {buf:?}");
+                    b'\x1b' as _
                 }
-            }
+            },
             _ => buf[0] as _,
         };
         Ok(key)
@@ -235,21 +236,43 @@ impl Ked {
 
     fn draw_rows(&mut self) -> VoidResult {
         for y in 0..self.screen_size.row {
-            if y == self.screen_size.row / 3 {
-                write!(
-                    self.buf,
-                    "{:^width$}",
-                    concat!("Welcome to ked -- ", env!("CARGO_PKG_VERSION")),
-                    width = self.screen_size.col as usize
-                )?;
+            if y as usize >= self.rows.len() {
+                if self.rows.is_empty() && y == self.screen_size.row / 3 {
+                    write!(
+                        self.buf,
+                        "{:^width$}",
+                        concat!("Welcome to ked -- ", env!("CARGO_PKG_VERSION")),
+                        width = self.screen_size.col as usize
+                    )?;
+                } else {
+                    write!(self.buf, "~")?;
+                }
             } else {
-                write!(self.buf, "~")?;
+                let row = &self.rows[y as usize];
+                // need to clip manually. using std::fmt's width option causes line wraps.
+                let clipped = &row[..row.len().min(self.screen_size.col as usize)];
+                write!(self.buf, "{clipped}")?;
             }
             esc_write!(self.buf, CLEAR_TRAIL_LINE)?;
             if y < self.screen_size.row - 1 {
                 write!(self.buf, "\r\n")?;
             }
         }
+        Ok(())
+    }
+
+    fn open(&mut self, path: impl AsRef<Path>) -> VoidResult {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path.as_ref())?;
+        let reader = BufReader::new(f);
+        self.rows = reader.lines().collect::<Result<Vec<_>, _>>()?;
+        log::trace!(
+            "Opened file: {} with {} lines.",
+            path.as_ref().display(),
+            self.rows.len()
+        );
         Ok(())
     }
 }
@@ -276,6 +299,9 @@ fn main() -> VoidResult {
         .init();
 
     let mut ked = Ked::new()?;
+    if let Some(path) = std::env::args().nth(1) {
+        ked.open(path)?;
+    }
     enable_raw_mode().expect("failed to enable raw");
     loop {
         ked.refresh_screen()?;
@@ -285,11 +311,11 @@ fn main() -> VoidResult {
                 // just a simple quit
             } else {
                 // need to reset the termios before printing errors.
-                drop(ked);
                 log::error!("Error! {e}");
             }
             break;
         }
     }
+    drop(ked);
     Ok(())
 }
