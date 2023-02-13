@@ -1,4 +1,5 @@
 #![feature(io_error_downcast)]
+#![feature(write_all_vectored)]
 
 mod error;
 
@@ -33,8 +34,8 @@ fn enable_raw_mode() -> VoidResult {
     Ok(())
 }
 
-const fn ctrl_key(k: u8) -> u8 {
-    k & 0b0001_1111
+const fn ctrl_key(k: u8) -> u32 {
+    (k & 0b0001_1111) as _
 }
 
 mod escape_seq {
@@ -48,6 +49,7 @@ mod escape_seq {
 }
 
 mod keys {
+    pub(crate) const BACKSPACE: u32 = 127;
     pub(crate) const UP: u32 = 1000;
     pub(crate) const DOWN: u32 = 1001;
     pub(crate) const LEFT: u32 = 1002;
@@ -56,6 +58,7 @@ mod keys {
     pub(crate) const PGDOWN: u32 = 1005;
     pub(crate) const HOME: u32 = 1006;
     pub(crate) const END: u32 = 1007;
+    pub(crate) const DELETE: u32 = 1008;
 }
 
 macro_rules! esc_write {
@@ -180,6 +183,7 @@ impl Ked {
                 b"F" => keys::END,
                 b"1~" | b"7~" => keys::HOME,
                 b"4~" | b"8~" => keys::END,
+                b"3~" => keys::DELETE,
                 b"5~" => keys::PGUP,
                 b"6~" => keys::PGDOWN,
                 _ => {
@@ -196,7 +200,13 @@ impl Ked {
         let c = self.read_key()?;
         log::trace!(target: "keytrace", "Key {c}");
         match c {
-            k if k == ctrl_key(b'q') as _ => return Err(KError::Quit),
+            k if k == b'\r' as _ => {
+                todo!("handle cr");
+            }
+            k if k == ctrl_key(b'q') => return Err(KError::Quit),
+            k if k == ctrl_key(b's') => self.save()?,
+            k if k == ctrl_key(b'h') || k == keys::BACKSPACE => todo!("special key"),
+            keys::DELETE => todo!("special key"),
             keys::UP
             | keys::DOWN
             | keys::LEFT
@@ -205,6 +215,9 @@ impl Ked {
             | keys::PGDOWN
             | keys::HOME
             | keys::END => self.move_cursor(c),
+            // Ignore ESC and Ctrl+l
+            k if k == ctrl_key(b'l') || k == b'\x1b' as _ => {}
+
             _ => {
                 let ch: char = char::from_u32(c).expect("invalid char");
                 self.insert_char(ch);
@@ -384,9 +397,8 @@ impl Ked {
         let n = self.screen_size.col as usize;
         if !self.status_msg.0.is_empty() && self.status_msg.1.elapsed() < Duration::from_secs(5) {
             write_trim!(self.buf, &self.status_msg.0, n)?;
-        } else {
-            self.buf.extend(iter::repeat(b' ').take(n));
         }
+        esc_write!(self.buf, CLEAR_TRAIL_LINE)?;
         Ok(())
     }
 
@@ -460,6 +472,35 @@ impl Ked {
             path.as_ref().display(),
             self.rows.len(),
         );
+        Ok(())
+    }
+
+    fn save(&mut self) -> VoidResult {
+        let path = self
+            .filepath
+            .as_ref()
+            .ok_or(io::Error::from(io::ErrorKind::NotFound))?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path);
+        match file {
+            Ok(mut file) => {
+                let size = self.rows.iter().fold(0, |acc, r| r.len() + 1 + acc);
+                let mut buf = Vec::with_capacity(size);
+                for row in &self.rows {
+                    writeln!(buf, "{row}")?;
+                }
+                match file.write_all(&buf) {
+                    Ok(_) => self.set_status_message(format_args!("Wrote {size} bytes to disk")),
+                    Err(err) => self
+                        .set_status_message(format_args!("Error writing to file for save: {err}")),
+                }
+            }
+            Err(err) => {
+                self.set_status_message(format_args!("Error opening file for save: {err}"));
+            }
+        }
         Ok(())
     }
 }
