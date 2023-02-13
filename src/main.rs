@@ -1,5 +1,6 @@
 #![feature(io_error_downcast)]
 #![feature(write_all_vectored)]
+#![feature(get_many_mut)]
 
 mod error;
 
@@ -206,7 +207,7 @@ impl Ked {
         log::trace!(target: "keytrace", "Key {c}");
         match c {
             k if k == b'\r' as _ => {
-                todo!("handle cr");
+                self.insert_newline();
             }
             k if k == ctrl_key(b'q') && (self.dirty_count == 0 || self.quit_count == 0) => {
                 return Err(KError::Quit)
@@ -477,6 +478,41 @@ impl Ked {
         }
         self.insert_char_at_pos(ch, self.cur.y, self.cur.x);
         self.cur.x += 1;
+        self.dirty_count = self.dirty_count.saturating_add(1);
+    }
+
+    fn insert_newline(&mut self) {
+        log::trace!(target: "edit::insert::newline", "Inserting nl at {:?}", self.cur);
+        if self.cur.y >= self.rows.len() {
+            let new_strs =
+                std::iter::repeat_with(String::new).take(self.rows.len() - self.cur.y + 1);
+            self.rows.extend(new_strs.clone());
+            self.render_rows.extend(new_strs);
+        } else {
+            let at = self.cur.y;
+            // insert a new blank row after current one
+            if at == self.rows.len() - 1 {
+                self.rows.push(String::new());
+                self.render_rows.push(String::new());
+            } else {
+                self.rows.insert(at + 1, String::new());
+                self.render_rows.insert(at + 1, String::new());
+            }
+
+            let [cur_row, next_row] = self
+                .rows
+                .get_many_mut([at, at + 1])
+                .expect("Indices should be correct");
+            let cut = self.cur.x.min(cur_row.len());
+            if cut != cur_row.len() {
+                next_row.insert_str(0, &cur_row[cut..]);
+                cur_row.truncate(cut);
+                self.render_rows[at] = self.get_render(at);
+            }
+            self.render_rows[at + 1] = self.get_render(at + 1);
+        }
+        self.cur.y += 1;
+        self.cur.x = 0;
         self.dirty_count = self.dirty_count.saturating_add(1);
     }
 
