@@ -225,7 +225,14 @@ impl Ked {
                 return Ok(());
             }
             k if k == ctrl_key(b's') => self.save()?,
-            k if k == ctrl_key(b'h') || k == keys::BACKSPACE => self.del_char(),
+            k if k == ctrl_key(b'h') || k == keys::BACKSPACE => {
+                if self.cur.y == self.rows.len() {
+                    // we are at the dummy row, move back.
+                    self.move_cursor(keys::LEFT);
+                } else {
+                    self.del_char()
+                }
+            }
             keys::DELETE => {
                 self.move_cursor(keys::RIGHT);
                 self.del_char();
