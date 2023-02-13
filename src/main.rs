@@ -251,11 +251,6 @@ impl Ked {
             _ => {
                 let ch: char = char::from_u32(c).expect("invalid char");
                 self.insert_char(ch);
-                // if ch.is_ascii_control() {
-                //     write!(self.buf, "{c}\r")?;
-                // } else {
-                //     write!(self.buf, "{c} ('{ch}')\r")?;
-                // }
             }
         }
         self.quit_count = QUIT_TIMES;
@@ -438,6 +433,42 @@ impl Ked {
         self.status_msg.1 = Instant::now();
     }
 
+    fn prompt(&mut self, prefix: &str, suffix: &str) -> KResult<Option<String>> {
+        let mut user_inp = String::new();
+        loop {
+            self.set_status_message(format_args!("{prefix}{user_inp}{suffix}"));
+            self.refresh_screen()?;
+            let c = self.read_key()?;
+            log::trace!(target: "keytrace::prompt", "Key {c}");
+            match c {
+                k if k == b'\r' as _ => {
+                    if !user_inp.is_empty() {
+                        self.set_status_message(format_args!(""));
+                        return Ok(Some(user_inp));
+                    }
+                }
+                k if k == b'\x1b' as _ => {
+                    // cancelled
+                    return Ok(None);
+                }
+                k if k == ctrl_key(b'h') || k == keys::BACKSPACE => {
+                    if !user_inp.is_empty() {
+                        user_inp.truncate(user_inp.len() - 1)
+                    };
+                }
+                _ => {
+                    if c > 128 {
+                        continue;
+                    }
+                    let ch: char = char::from_u32(c).expect("invalid char");
+                    if !ch.is_control() {
+                        user_inp.push(ch);
+                    }
+                }
+            }
+        }
+    }
+
     fn get_render(&self, row_idx: usize) -> String {
         let line = &self.rows[row_idx];
         let mut out = String::with_capacity(
@@ -587,11 +618,19 @@ impl Ked {
     }
 
     fn save(&mut self) -> VoidResult {
-        let path = self
-            .filepath
-            .as_ref()
-            .ok_or(io::Error::from(io::ErrorKind::NotFound))?;
+        if self.filepath.is_none() {
+            let path = self.prompt("Save as: ", " (ESC to cancel)")?;
+            if let Some(path) = path {
+                self.filepath = Some(PathBuf::from(path));
+            } else {
+                self.set_status_message(format_args!("Save cancelled."));
+                return Ok(());
+            }
+        }
+        let path = self.filepath.as_ref().unwrap();
+
         let file = std::fs::OpenOptions::new()
+            .create(true)
             .write(true)
             .truncate(true)
             .open(path);
