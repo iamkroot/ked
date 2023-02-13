@@ -115,9 +115,12 @@ struct Ked {
     coloff: usize,
     filepath: Option<PathBuf>,
     status_msg: (String, Instant),
+    dirty_count: u32,
+    quit_count: u32,
 }
 
 const TAB_STOP: usize = 4;
+const QUIT_TIMES: u32 = 3;
 
 impl Ked {
     fn new() -> KResult<Self> {
@@ -142,6 +145,8 @@ impl Ked {
             render_pos_x: 0,
             filepath: None,
             status_msg: (Default::default(), Instant::now()),
+            dirty_count: 0,
+            quit_count: QUIT_TIMES,
         })
     }
 
@@ -203,7 +208,21 @@ impl Ked {
             k if k == b'\r' as _ => {
                 todo!("handle cr");
             }
-            k if k == ctrl_key(b'q') => return Err(KError::Quit),
+            k if k == ctrl_key(b'q') && (self.dirty_count == 0 || self.quit_count == 0) => {
+                return Err(KError::Quit)
+            }
+            k if k == ctrl_key(b'q') => {
+                let quit_count = self.quit_count;
+                self.set_status_message(format_args!(
+                    concat!(
+                        "Warning! File has unsaved changes. ",
+                        "Press Ctrl+Q {} more times to quit"
+                    ),
+                    quit_count
+                ));
+                self.quit_count -= 1;
+                return Ok(());
+            }
             k if k == ctrl_key(b's') => self.save()?,
             k if k == ctrl_key(b'h') || k == keys::BACKSPACE => todo!("special key"),
             keys::DELETE => todo!("special key"),
@@ -228,6 +247,7 @@ impl Ked {
                 // }
             }
         }
+        self.quit_count = QUIT_TIMES;
         Ok(())
     }
 
@@ -454,6 +474,7 @@ impl Ked {
         }
         self.insert_char_at_pos(ch, self.cur.y, self.cur.x);
         self.cur.x += 1;
+        self.dirty_count = self.dirty_count.saturating_add(1);
     }
 
     fn open(&mut self, path: impl AsRef<Path>) -> VoidResult {
@@ -492,7 +513,10 @@ impl Ked {
                     writeln!(buf, "{row}")?;
                 }
                 match file.write_all(&buf) {
-                    Ok(_) => self.set_status_message(format_args!("Wrote {size} bytes to disk")),
+                    Ok(_) => {
+                        self.set_status_message(format_args!("Wrote {size} bytes to disk"));
+                        self.dirty_count = 0;
+                    }
                     Err(err) => self
                         .set_status_message(format_args!("Error writing to file for save: {err}")),
                 }
