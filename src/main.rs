@@ -224,8 +224,11 @@ impl Ked {
                 return Ok(());
             }
             k if k == ctrl_key(b's') => self.save()?,
-            k if k == ctrl_key(b'h') || k == keys::BACKSPACE => todo!("special key"),
-            keys::DELETE => todo!("special key"),
+            k if k == ctrl_key(b'h') || k == keys::BACKSPACE => self.del_char(),
+            keys::DELETE => {
+                self.move_cursor(keys::RIGHT);
+                self.del_char();
+            }
             keys::UP
             | keys::DOWN
             | keys::LEFT
@@ -475,6 +478,50 @@ impl Ked {
         self.insert_char_at_pos(ch, self.cur.y, self.cur.x);
         self.cur.x += 1;
         self.dirty_count = self.dirty_count.saturating_add(1);
+    }
+
+    fn del_char_at_pos(&mut self, row_idx: usize, col: usize) {
+        let row = &mut self.rows[row_idx];
+        log::trace!(target: "edit::delete", "Old row: '{row}'");
+        if col > row.len() {
+            log::warn!("Trying to delete char outside row!");
+            log::debug!("Line: '{row}'. col: {col}");
+            return;
+        }
+        row.remove(col);
+        log::trace!(target: "edit::delete", "New row: '{row}'");
+        self.render_rows[row_idx] = self.get_render(row_idx);
+        self.dirty_count = self.dirty_count.saturating_add(1);
+    }
+
+    /// Delete char that is to the left of the cursor.
+    fn del_char(&mut self) {
+        log::trace!(target: "edit::delete", "Deleting char at {:?}", self.cur);
+        if self.cur.y >= self.rows.len() {
+            // no need to do anything
+            log::trace!(target: "edit::delete", "Deleting outside num_rows, no-op");
+            return;
+        }
+        if self.cur.x == 0 {
+            if self.cur.y == 0 {
+                // no need to do anything
+                log::trace!(target: "edit::delete", "Trying to delete at start of file, no-op");
+                return;
+            }
+            log::trace!(target: "edit::delete", "Deleting at start of line");
+            let cur_row = self.rows.remove(self.cur.y);
+            self.render_rows.remove(self.cur.y);
+            self.cur.y -= 1;
+            let row = &mut self.rows[self.cur.y];
+            self.cur.x = row.len();
+            row.push_str(&cur_row);
+            log::trace!(target: "edit::delete", "New row: '{row}'");
+            self.render_rows[self.cur.y] = self.get_render(self.cur.y);
+            self.dirty_count = self.dirty_count.saturating_add(1);
+        } else {
+            self.cur.x -= 1;
+            self.del_char_at_pos(self.cur.y, self.cur.x);
+        }
     }
 
     fn open(&mut self, path: impl AsRef<Path>) -> VoidResult {
