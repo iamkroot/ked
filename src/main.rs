@@ -126,15 +126,24 @@ struct Ked {
 const TAB_STOP: usize = 4;
 const QUIT_TIMES: u32 = 3;
 
-type PromptCBArgs<'a, 'b> = (&'a mut Ked, &'b str, u32);
 type PromptCB = fn(&mut Ked, &str, u32) -> KResult<()>;
 trait PromptCBTrait {
-    fn call(&mut self, args: PromptCBArgs) -> KResult<()>;
+    fn call(&mut self, ked: &mut Ked, query: &str, key: u32) -> KResult<()>;
 }
 
 impl<T: FnMut(&mut Ked, &str, u32) -> KResult<()>> PromptCBTrait for T {
-    fn call(&mut self, args: PromptCBArgs) -> KResult<()> {
-        self.call_mut(args)
+    fn call(&mut self, ked: &mut Ked, query: &str, key: u32) -> KResult<()> {
+        self.call_mut((ked, query, key))
+    }
+}
+
+impl<T: PromptCBTrait> PromptCBTrait for Option<T> {
+    fn call(&mut self, ked: &mut Ked, query: &str, key: u32) -> KResult<()> {
+        if let Some(cb) = self.as_mut() {
+            cb.call(ked, query, key)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -449,11 +458,11 @@ impl Ked {
         self.status_msg.1 = Instant::now();
     }
 
-    fn prompt<F: PromptCBTrait>(
+    fn prompt(
         &mut self,
         prefix: &str,
         suffix: &str,
-        mut callback: Option<F>,
+        mut callback: impl PromptCBTrait,
     ) -> KResult<Option<String>> {
         let mut user_inp = String::new();
         loop {
@@ -465,18 +474,14 @@ impl Ked {
                 keys::CR => {
                     if !user_inp.is_empty() {
                         self.set_status_message(format_args!(""));
-                        if let Some(callback) = callback.as_mut() {
-                            callback.call((self, &user_inp, c))?
-                        };
+                        callback.call(self, &user_inp, c)?;
 
                         return Ok(Some(user_inp));
                     }
                 }
                 keys::ESC => {
                     // cancelled
-                    if let Some(callback) = callback.as_mut() {
-                        callback.call((self, &user_inp, c))?
-                    };
+                    callback.call(self, &user_inp, c)?;
                     return Ok(None);
                 }
                 k if k == ctrl_key(b'h') || k == keys::BACKSPACE => {
@@ -493,9 +498,7 @@ impl Ked {
                     }
                 }
             }
-            if let Some(callback) = callback.as_mut() {
-                callback.call((self, &user_inp, c))?
-            };
+            callback.call(self, &user_inp, c)?;
         }
     }
 
@@ -714,7 +717,7 @@ impl Ked {
         }
 
         impl PromptCBTrait for FindCB {
-            fn call(&mut self, (ked, query, key): PromptCBArgs) -> KResult<()> {
+            fn call(&mut self, ked: &mut Ked, query: &str, key: u32) -> KResult<()> {
                 log::trace!(target: "find::cb", "callback on '{query}' with {key}");
                 if key == keys::ESC {
                     ked.set_status_message(format_args!("Search cancelled."));
@@ -783,7 +786,7 @@ impl Ked {
 
         let callback = FindCB::new();
 
-        let query = self.prompt("Search: ", " (ESC to cancel)", Some(callback))?;
+        let query = self.prompt("Search: ", " (ESC to cancel)", callback)?;
         if query.is_none() {
             // restore position if user cancelled the search
             self.cur = saved_pos;
