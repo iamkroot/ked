@@ -1,7 +1,6 @@
 #![feature(io_error_downcast)]
 #![feature(write_all_vectored)]
 #![feature(get_many_mut)]
-#![feature(fn_traits)]
 
 mod error;
 
@@ -127,25 +126,6 @@ const TAB_STOP: usize = 4;
 const QUIT_TIMES: u32 = 3;
 
 type PromptCB = fn(&mut Ked, &str, u32) -> KResult<()>;
-trait PromptCBTrait {
-    fn call(&mut self, ked: &mut Ked, query: &str, key: u32) -> KResult<()>;
-}
-
-impl<T: FnMut(&mut Ked, &str, u32) -> KResult<()>> PromptCBTrait for T {
-    fn call(&mut self, ked: &mut Ked, query: &str, key: u32) -> KResult<()> {
-        self.call_mut((ked, query, key))
-    }
-}
-
-impl<T: PromptCBTrait> PromptCBTrait for Option<T> {
-    fn call(&mut self, ked: &mut Ked, query: &str, key: u32) -> KResult<()> {
-        if let Some(cb) = self.as_mut() {
-            cb.call(ked, query, key)
-        } else {
-            Ok(())
-        }
-    }
-}
 
 impl Ked {
     fn new() -> KResult<Self> {
@@ -458,12 +438,15 @@ impl Ked {
         self.status_msg.1 = Instant::now();
     }
 
-    fn prompt(
+    fn prompt<F>(
         &mut self,
         prefix: &str,
         suffix: &str,
-        mut callback: impl PromptCBTrait,
-    ) -> KResult<Option<String>> {
+        mut callback: Option<F>,
+    ) -> KResult<Option<String>>
+    where
+        F: FnMut(&mut Ked, &str, u32) -> KResult<()>,
+    {
         let mut user_inp = String::new();
         loop {
             self.set_status_message(format_args!("{prefix}{user_inp}{suffix}"));
@@ -474,14 +457,18 @@ impl Ked {
                 keys::CR => {
                     if !user_inp.is_empty() {
                         self.set_status_message(format_args!(""));
-                        callback.call(self, &user_inp, c)?;
+                        if let Some(callback) = callback.as_mut() {
+                            callback(self, &user_inp, c)?
+                        }
 
                         return Ok(Some(user_inp));
                     }
                 }
                 keys::ESC => {
                     // cancelled
-                    callback.call(self, &user_inp, c)?;
+                    if let Some(callback) = callback.as_mut() {
+                        callback(self, &user_inp, c)?
+                    }
                     return Ok(None);
                 }
                 k if k == ctrl_key(b'h') || k == keys::BACKSPACE => {
@@ -498,7 +485,9 @@ impl Ked {
                     }
                 }
             }
-            callback.call(self, &user_inp, c)?;
+            if let Some(callback) = callback.as_mut() {
+                callback(self, &user_inp, c)?
+            }
         }
     }
 
@@ -701,92 +690,78 @@ impl Ked {
             Forward,
         }
 
-        #[derive(Debug, Clone, Copy)]
-        struct FindCB {
-            last_match: Option<Pos>,
-            direction: SearchDir,
-        }
+        // these will be captured by the callback
+        let mut last_match: Option<Pos> = None;
+        let mut direction = SearchDir::Forward;
 
-        impl FindCB {
-            fn new() -> Self {
-                Self {
-                    last_match: None,
-                    direction: SearchDir::Forward,
-                }
+        let callback = |ked: &mut Ked, query: &str, key: u32| -> KResult<()> {
+            log::trace!(target: "find::cb", "callback on '{query}' with {key}");
+            if key == keys::ESC {
+                ked.set_status_message(format_args!("Search cancelled."));
+                return Ok(());
+            } else if key == keys::CR {
+                return Ok(());
+            } else if key == keys::RIGHT || key == keys::DOWN {
+                log::trace!(target: "find::cb", "searchdir forward");
+                direction = SearchDir::Forward;
+            } else if key == keys::LEFT || key == keys::UP {
+                log::trace!(target: "find::cb", "searchdir back");
+                direction = SearchDir::Back;
+            } else {
+                // got new char added to query, reset state
+                log::trace!(target: "find::cb", "reset last_match");
+                last_match = None;
+                direction = SearchDir::Forward;
             }
-        }
-
-        impl PromptCBTrait for FindCB {
-            fn call(&mut self, ked: &mut Ked, query: &str, key: u32) -> KResult<()> {
-                log::trace!(target: "find::cb", "callback on '{query}' with {key}");
-                if key == keys::ESC {
-                    ked.set_status_message(format_args!("Search cancelled."));
-                    return Ok(());
-                } else if key == keys::CR {
-                    return Ok(());
-                } else if key == keys::RIGHT || key == keys::DOWN {
-                    log::trace!(target: "find::cb", "searchdir forward");
-                    self.direction = SearchDir::Forward;
-                } else if key == keys::LEFT || key == keys::UP {
-                    log::trace!(target: "find::cb", "searchdir back");
-                    self.direction = SearchDir::Back;
-                } else {
-                    // got new char added to query, reset state
-                    log::trace!(target: "find::cb", "reset last_match");
-                    self.last_match = None;
-                    self.direction = SearchDir::Forward;
-                }
-                let numrows = ked.rows.len();
-                let rows_iter = ked.rows.iter().enumerate();
-                let rows_iter =
-                    if self.direction == SearchDir::Forward {
-                        let skip_rows = self.last_match.map_or(0, |m| m.y);
-                        log::trace!(target: "find::cb", "forward skipped rows={skip_rows}");
-                        rows_iter // skip the rows before last_match, if it exists
-                            .skip(skip_rows)
-                            .enumerate()
-                            .find_map(|(i, (rownum, row))| {
-                                let find_offset = if i == 0 {
-                                    // find the match in the same row, just after last_match
-                                    self.last_match.map_or(0, |m| (m.x + 1).min(row.len()))
-                                } else {
-                                    0
-                                };
-                                row[find_offset..].find(query).map(|x| Pos {
-                                    y: rownum,
-                                    x: x + find_offset,
-                                })
-                            })
-                    } else {
-                        let skip_rows = self.last_match.map_or(0, |m| numrows - m.y - 1);
-                        log::trace!(target: "find::cb", "back skipped rows={skip_rows}");
-                        rows_iter.rev().skip(skip_rows).enumerate().find_map(
-                            |(i, (rownum, row))| {
-                                let rfind_offset = if i == 0 {
-                                    // find the match in the same row, just before last_match
-                                    self.last_match.map_or(row.len(), |m| m.x + query.len() - 1)
-                                } else {
-                                    row.len()
-                                };
-                                row[0..rfind_offset]
-                                    .rfind(query)
-                                    .map(|x| Pos { y: rownum, x })
-                            },
-                        )
-                    };
-                if let Some(match_pos) = rows_iter {
-                    log::trace!(target: "find::cb", "found match {match_pos:?}");
-                    self.last_match = Some(match_pos);
-                    ked.cur = match_pos;
-                    ked.scroll_screen();
-                }
-                Ok(())
+            let numrows = ked.rows.len();
+            let rows_iter = ked.rows.iter().enumerate();
+            let rows_iter = if direction == SearchDir::Forward {
+                let skip_rows = last_match.map_or(0, |m| m.y);
+                log::trace!(target: "find::cb", "forward skipped rows={skip_rows}");
+                rows_iter // skip the rows before last_match, if it exists
+                    .skip(skip_rows)
+                    .enumerate()
+                    .find_map(|(i, (rownum, row))| {
+                        let find_offset = if i == 0 {
+                            // find the match in the same row, just after last_match
+                            last_match.map_or(0, |m| (m.x + 1).min(row.len()))
+                        } else {
+                            0
+                        };
+                        row[find_offset..].find(query).map(|x| Pos {
+                            y: rownum,
+                            x: x + find_offset,
+                        })
+                    })
+            } else {
+                let skip_rows = last_match.map_or(0, |m| numrows - m.y - 1);
+                log::trace!(target: "find::cb", "back skipped rows={skip_rows}");
+                rows_iter
+                    .rev()
+                    .skip(skip_rows)
+                    .enumerate()
+                    .find_map(|(i, (rownum, row))| {
+                        let rfind_offset = if i == 0 {
+                            // find the match in the same row, just before last_match
+                            last_match.map_or(row.len(), |m| m.x + query.len() - 1)
+                        } else {
+                            row.len()
+                        };
+                        row[0..rfind_offset]
+                            .rfind(query)
+                            .map(|x| Pos { y: rownum, x })
+                    })
+            };
+            if let Some(match_pos) = rows_iter {
+                log::trace!(target: "find::cb", "found match {match_pos:?}");
+                last_match = Some(match_pos);
+                ked.cur = match_pos;
+                ked.scroll_screen();
             }
-        }
+            Ok(())
+        };
 
-        let callback = FindCB::new();
-
-        let query = self.prompt("Search: ", " (ESC to cancel)", callback)?;
+        let query = self.prompt("Search: ", " (ESC to cancel)", Some(callback))?;
         if query.is_none() {
             // restore position if user cancelled the search
             self.cur = saved_pos;
