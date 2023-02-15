@@ -225,6 +225,7 @@ impl Ked {
                 return Ok(());
             }
             k if k == ctrl_key(b's') => self.save()?,
+            k if k == ctrl_key(b'f') => self.find()?,
             k if k == ctrl_key(b'h') || k == keys::BACKSPACE => {
                 if self.cur.y == self.rows.len() {
                     // we are at the dummy row, move back.
@@ -654,6 +655,24 @@ impl Ked {
                 self.set_status_message(format_args!("Error opening file for save: {err}"));
             }
         }
+        Ok(())
+    }
+
+    fn find(&mut self) -> VoidResult {
+        let query = self.prompt("Search: ", " (ESC to cancel)")?;
+        let Some(query) = query else {
+            self.set_status_message(format_args!("Search cancelled."));
+            return Ok(());
+        };
+        if let Some(match_pos) = self
+            .rows
+            .iter()
+            .enumerate()
+            .find_map(|(rownum, row)| row.find(&query).map(|x| Pos { y: rownum, x }))
+        {
+            self.cur = match_pos;
+            self.scroll_screen();
+        };
         Ok(())
     }
 }
