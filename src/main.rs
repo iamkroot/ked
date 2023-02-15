@@ -50,6 +50,8 @@ mod escape_seq {
 }
 
 mod keys {
+    pub(crate) const ESC: u32 = b'\x1b' as _;
+    pub(crate) const CR: u32 = b'\r' as _;
     pub(crate) const BACKSPACE: u32 = 127;
     pub(crate) const UP: u32 = 1000;
     pub(crate) const DOWN: u32 = 1001;
@@ -122,6 +124,8 @@ struct Ked {
 
 const TAB_STOP: usize = 4;
 const QUIT_TIMES: u32 = 3;
+
+type PromptCB = fn(&mut Ked, &str, u32) -> KResult<()>;
 
 impl Ked {
     fn new() -> KResult<Self> {
@@ -434,7 +438,15 @@ impl Ked {
         self.status_msg.1 = Instant::now();
     }
 
-    fn prompt(&mut self, prefix: &str, suffix: &str) -> KResult<Option<String>> {
+    fn prompt<F>(
+        &mut self,
+        prefix: &str,
+        suffix: &str,
+        mut callback: Option<F>,
+    ) -> KResult<Option<String>>
+    where
+        F: FnMut(&mut Self, &str, u32) -> KResult<()>,
+    {
         let mut user_inp = String::new();
         loop {
             self.set_status_message(format_args!("{prefix}{user_inp}{suffix}"));
@@ -442,14 +454,21 @@ impl Ked {
             let c = self.read_key()?;
             log::trace!(target: "keytrace::prompt", "Key {c}");
             match c {
-                k if k == b'\r' as _ => {
+                keys::CR => {
                     if !user_inp.is_empty() {
                         self.set_status_message(format_args!(""));
+                        if let Some(callback) = callback.as_mut() {
+                            callback(self, &user_inp, c)?
+                        };
+
                         return Ok(Some(user_inp));
                     }
                 }
-                k if k == b'\x1b' as _ => {
+                keys::ESC => {
                     // cancelled
+                    if let Some(callback) = callback.as_mut() {
+                        callback(self, &user_inp, c)?
+                    };
                     return Ok(None);
                 }
                 k if k == ctrl_key(b'h') || k == keys::BACKSPACE => {
@@ -467,6 +486,9 @@ impl Ked {
                     }
                 }
             }
+            if let Some(callback) = callback.as_mut() {
+                callback(self, &user_inp, c)?
+            };
         }
     }
 
@@ -620,7 +642,7 @@ impl Ked {
 
     fn save(&mut self) -> VoidResult {
         if self.filepath.is_none() {
-            let path = self.prompt("Save as: ", " (ESC to cancel)")?;
+            let path = self.prompt("Save as: ", " (ESC to cancel)", None::<PromptCB>)?;
             if let Some(path) = path {
                 self.filepath = Some(PathBuf::from(path));
             } else {
@@ -659,20 +681,27 @@ impl Ked {
     }
 
     fn find(&mut self) -> VoidResult {
-        let query = self.prompt("Search: ", " (ESC to cancel)")?;
-        let Some(query) = query else {
-            self.set_status_message(format_args!("Search cancelled."));
-            return Ok(());
+        let callback = |self2: &mut Self, query: &str, key: u32| {
+            log::trace!(target: "find::cb", "callback on '{query}' with {key}");
+            if key == keys::ESC {
+                self2.set_status_message(format_args!("Search cancelled."));
+                return Ok(());
+            } else if key == keys::CR {
+                return Ok(());
+            }
+            if let Some(match_pos) = self2
+                .rows
+                .iter()
+                .enumerate()
+                .find_map(|(rownum, row)| row.find(query).map(|x| Pos { y: rownum, x }))
+            {
+                self2.cur = match_pos;
+                self2.scroll_screen();
+            }
+            Ok(())
         };
-        if let Some(match_pos) = self
-            .rows
-            .iter()
-            .enumerate()
-            .find_map(|(rownum, row)| row.find(&query).map(|x| Pos { y: rownum, x }))
-        {
-            self.cur = match_pos;
-            self.scroll_screen();
-        };
+        let _ = self.prompt("Search: ", " (ESC to cancel)", Some(callback))?;
+
         Ok(())
     }
 }
