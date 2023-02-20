@@ -43,6 +43,7 @@ mod escape_seq {
     pub(crate) const CLEAR_TRAIL_LINE: &[u8] = b"K";
     pub(crate) const HIDE_CURSOR: &[u8] = b"?25l";
     pub(crate) const UNHIDE_CURSOR: &[u8] = b"?25h";
+    pub(crate) const BLINK_BEAM_CURSOR: &[u8] = b"5 q";
     pub(crate) const RESET_CURSOR: &[u8] = b"1;1H";
     pub(crate) const INVERT_COLOR: &[u8] = b"7m";
     pub(crate) const NORMAL_COLOR: &[u8] = b"m";
@@ -548,6 +549,7 @@ impl Ked {
 
     fn refresh_screen(&mut self) -> VoidResult {
         self.buf.clear();
+        esc_write!(self.buf, BLINK_BEAM_CURSOR)?;
         self.scroll_screen()?;
         esc_write!(self.buf, HIDE_CURSOR)?;
         esc_write!(self.buf, RESET_CURSOR)?;
