@@ -35,10 +35,6 @@ fn enable_raw_mode() -> VoidResult {
     Ok(())
 }
 
-const fn ctrl_key(k: u8) -> u32 {
-    (k & 0b0001_1111) as _
-}
-
 mod escape_seq {
     pub(crate) const CLEAR: &[u8] = b"2J";
     pub(crate) const CLEAR_TRAIL_LINE: &[u8] = b"K";
@@ -50,18 +46,89 @@ mod escape_seq {
 }
 
 mod keys {
-    pub(crate) const ESC: u32 = b'\x1b' as _;
-    pub(crate) const CR: u32 = b'\r' as _;
-    pub(crate) const BACKSPACE: u32 = 127;
-    pub(crate) const UP: u32 = 1000;
-    pub(crate) const DOWN: u32 = 1001;
-    pub(crate) const LEFT: u32 = 1002;
-    pub(crate) const RIGHT: u32 = 1003;
-    pub(crate) const PGUP: u32 = 1004;
-    pub(crate) const PGDOWN: u32 = 1005;
-    pub(crate) const HOME: u32 = 1006;
-    pub(crate) const END: u32 = 1007;
-    pub(crate) const DELETE: u32 = 1008;
+    use crate::Pos;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Dir {
+        Up,
+        Down,
+        Left,
+        Right,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Key {
+        Arrow(Dir),
+        Page(Dir),
+        Home,
+        End,
+        Enter,
+        Backspace,
+        Delete,
+        Esc,
+        Chr(char),
+    }
+
+    // We could use bitflags for this, but meh
+    #[allow(unused)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Modifier {
+        None,
+        Ctrl,
+        Shift,
+        Alt,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct KeyEvent {
+        pub(crate) key: Key,
+        pub(crate) modifiers: Modifier,
+    }
+    impl KeyEvent {
+        pub(crate) fn new(key: Key) -> KeyEvent {
+            KeyEvent {
+                key,
+                modifiers: Modifier::None,
+            }
+        }
+    }
+
+    #[allow(unused)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum MouseButton {
+        Left,
+        Right,
+        Middle,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum MouseEventKind {
+        Press(MouseButton),
+        Release(MouseButton),
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct MouseEvent {
+        pub(crate) kind: MouseEventKind,
+        pub(crate) pos: Pos,
+        pub(crate) modifiers: Modifier,
+    }
+
+    impl MouseEvent {
+        pub(crate) fn new(kind: MouseEventKind, pos: Pos) -> MouseEvent {
+            MouseEvent {
+                kind,
+                pos,
+                modifiers: Modifier::None,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Event {
+        Key(KeyEvent),
+        Mouse(MouseEvent),
+    }
 }
 
 macro_rules! esc_write {
@@ -98,7 +165,7 @@ struct TermSize {
     _y: libc::c_ushort,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Pos {
     x: usize,
     y: usize,
@@ -126,7 +193,7 @@ struct Ked {
 const TAB_STOP: usize = 4;
 const QUIT_TIMES: u32 = 3;
 
-type PromptCB = fn(&mut Ked, &str, u32) -> KResult<()>;
+type PromptCB = fn(&mut Ked, &str, keys::Event) -> KResult<()>;
 
 impl Ked {
     fn new() -> KResult<Self> {
@@ -188,7 +255,8 @@ impl Ked {
         Ok(())
     }
 
-    fn read_key(&mut self) -> KResult<u32> {
+    fn read_key(&mut self) -> KResult<keys::Event> {
+        use keys::{Dir::*, Event, Key::*, KeyEvent, MouseEvent};
         let mut buf = [0; 6];
         let mut n: usize;
         // block till we read *something*
@@ -199,57 +267,82 @@ impl Ked {
             }
         }
         log::trace!(target: "read_key", "readkey {buf:?}");
-        let key: u32 = match &buf[0..2] {
+        let key: keys::Event = match &buf[0..2] {
             b"\x1b[" => match &buf[2..n] {
-                b"A" => keys::UP,
-                b"B" => keys::DOWN,
-                b"C" => keys::RIGHT,
-                b"D" => keys::LEFT,
-                b"H" => keys::HOME,
-                b"F" => keys::END,
-                b"1~" | b"7~" => keys::HOME,
-                b"4~" | b"8~" => keys::END,
-                b"3~" => keys::DELETE,
-                b"5~" => keys::PGUP,
-                b"6~" => keys::PGDOWN,
-                _ if n == 6 => {
-                    match &buf[2..4] {
-                        b"M " | b"M#" => {
-                            let row = usize::from(buf[4]).saturating_sub(32) - 1;
-                            let col = usize::from(buf[5]).saturating_sub(32) - 1;
-                            let pos = Pos { x: row, y: col };
-                            if buf[3] == b' ' {
-                                log::info!(target: "read_key", "Mouse press at coords: {pos:?}");
-                            } else {
-                                log::info!(target: "read_key", "Mouse release at coords: {pos:?}");
-                            }
-                            // TODO: Return the keys correctly
-                            keys::ESC
-                        }
-                        _ => keys::ESC,
+                b"A" => Event::Key(KeyEvent::new(Arrow(Up))),
+                b"B" => Event::Key(KeyEvent::new(Arrow(Down))),
+                b"C" => Event::Key(KeyEvent::new(Arrow(Right))),
+                b"D" => Event::Key(KeyEvent::new(Arrow(Left))),
+                b"H" => Event::Key(KeyEvent::new(Home)),
+                b"F" => Event::Key(KeyEvent::new(End)),
+                b"1~" | b"7~" => Event::Key(KeyEvent::new(Home)),
+                b"4~" | b"8~" => Event::Key(KeyEvent::new(End)),
+                b"3~" => Event::Key(KeyEvent::new(Delete)),
+                b"5~" => Event::Key(KeyEvent::new(Page(Up))),
+                b"6~" => Event::Key(KeyEvent::new(Page(Down))),
+                _ if n == 6 => match &buf[2..4] {
+                    // mouse button
+                    b"M " | b"M#" => {
+                        let row = usize::from(buf[4]).saturating_sub(32) - 1;
+                        let col = usize::from(buf[5]).saturating_sub(32) - 1;
+                        let pos = Pos { x: row, y: col };
+                        let kind = if buf[3] == b' ' {
+                            log::info!(target: "read_key", "Mouse press at coords: {pos:?}");
+                            keys::MouseEventKind::Press(keys::MouseButton::Left)
+                        } else {
+                            log::info!(target: "read_key", "Mouse release at coords: {pos:?}");
+                            keys::MouseEventKind::Release(keys::MouseButton::Left)
+                        };
+                        Event::Mouse(MouseEvent::new(kind, pos))
                     }
-                }
+                    _ => Event::Key(KeyEvent::new(Esc)),
+                },
                 _ => {
                     log::warn!(target: "read_key", "Weird data on stdin: {buf:?}");
-                    b'\x1b' as _
+                    Event::Key(KeyEvent::new(Esc))
                 }
             },
-            _ => buf[0] as _,
+            _ => match buf[0] {
+                b'\x1b' => Event::Key(KeyEvent::new(Esc)),
+                b'\r' => Event::Key(KeyEvent::new(Enter)),
+                c @ b'\x01'..=b'\x1a' => Event::Key(KeyEvent {
+                    key: Chr((c - 0x1 + b'a') as char),
+                    modifiers: keys::Modifier::Ctrl,
+                }),
+                c @ b'\x1c'..=b'\x1f' => Event::Key(KeyEvent {
+                    key: Chr((c - 0xc1 + 4) as char),
+                    modifiers: keys::Modifier::Ctrl,
+                }),
+                b'\0' => Event::Key(KeyEvent {
+                    key: Chr(' '),
+                    modifiers: keys::Modifier::Ctrl,
+                }),
+                b'\x7f' => Event::Key(KeyEvent::new(Backspace)),
+                _ => Event::Key(KeyEvent::new(Chr(
+                    char::from_u32(buf[0] as _).expect("Invalid char")
+                ))),
+            },
         };
         Ok(key)
     }
 
     fn process_key(&mut self) -> VoidResult {
+        use keys::{Event, Key::*, KeyEvent, Modifier::*};
+
         let c = self.read_key()?;
-        log::trace!(target: "keytrace", "Key {c}");
+        log::trace!(target: "keytrace", "Key {c:?}");
         match c {
-            k if k == b'\r' as _ => {
+            Event::Key(KeyEvent { key: Enter, .. }) => {
                 self.insert_newline();
             }
-            k if k == ctrl_key(b'q') && (self.dirty_count == 0 || self.quit_count == 0) => {
-                return Err(KError::Quit)
-            }
-            k if k == ctrl_key(b'q') => {
+            Event::Key(KeyEvent {
+                key: Chr('q'),
+                modifiers: Ctrl,
+            }) if (self.dirty_count == 0 || self.quit_count == 0) => return Err(KError::Quit),
+            Event::Key(KeyEvent {
+                key: Chr('q'),
+                modifiers: Ctrl,
+            }) => {
                 let quit_count = self.quit_count;
                 self.set_status_message(format_args!(
                     concat!(
@@ -261,50 +354,61 @@ impl Ked {
                 self.quit_count -= 1;
                 return Ok(());
             }
-            k if k == ctrl_key(b's') => self.save()?,
-            k if k == ctrl_key(b'f') => self.find()?,
-            k if k == ctrl_key(b'l') => {
+            Event::Key(KeyEvent {
+                key: Chr('s'),
+                modifiers: Ctrl,
+            }) => self.save()?,
+            Event::Key(KeyEvent {
+                key: Chr('f'),
+                modifiers: Ctrl,
+            }) => self.find()?,
+            Event::Key(KeyEvent {
+                key: Chr('l'),
+                modifiers: Ctrl,
+            }) => {
                 self.show_line_nums = !self.show_line_nums;
             }
 
-            k if k == ctrl_key(b'h') || k == keys::BACKSPACE => {
+            Event::Key(KeyEvent {
+                key: Chr('h'),
+                modifiers: Ctrl,
+            })
+            | Event::Key(KeyEvent { key: Backspace, .. }) => {
                 if self.cur.y == self.rows.len() {
                     // we are at the dummy row, move back.
-                    self.move_cursor(keys::LEFT);
+                    self.move_cursor(Arrow(keys::Dir::Left));
                 } else {
                     self.del_char()
                 }
             }
-            keys::DELETE => {
-                self.move_cursor(keys::RIGHT);
+            Event::Key(KeyEvent { key: Delete, .. }) => {
+                self.move_cursor(Arrow(keys::Dir::Right));
                 self.del_char();
             }
-            keys::UP
-            | keys::DOWN
-            | keys::LEFT
-            | keys::RIGHT
-            | keys::PGUP
-            | keys::PGDOWN
-            | keys::HOME
-            | keys::END => self.move_cursor(c),
-            // Ignore ESC and Ctrl+l
-            k if k == ctrl_key(b'l') || k == b'\x1b' as _ => {}
+            Event::Key(KeyEvent {
+                key: c @ Arrow(_) | c @ Page(_) | c @ Home | c @ End,
+                ..
+            }) => self.move_cursor(c),
+            // Ignore ESC
+            Event::Key(KeyEvent { key: Esc, .. }) => {}
 
-            _ => {
-                let ch: char = char::from_u32(c).expect("invalid char");
+            Event::Key(KeyEvent { key: Chr(ch), .. }) => {
                 self.insert_char(ch);
+            }
+            Event::Mouse(_) => {
+                todo!("Handle mouse")
             }
         }
         self.quit_count = QUIT_TIMES;
         Ok(())
     }
 
-    fn move_cursor(&mut self, key: u32) {
+    fn move_cursor(&mut self, key: keys::Key) {
         let row = self.rows.get(self.cur.y);
         match key {
-            keys::UP => self.cur.y = self.cur.y.saturating_sub(1),
-            keys::DOWN => self.cur.y = (self.cur.y + 1).min(self.rows.len()),
-            keys::LEFT => {
+            keys::Key::Arrow(keys::Dir::Up) => self.cur.y = self.cur.y.saturating_sub(1),
+            keys::Key::Arrow(keys::Dir::Down) => self.cur.y = (self.cur.y + 1).min(self.rows.len()),
+            keys::Key::Arrow(keys::Dir::Left) => {
                 if self.cur.x == 0 {
                     self.cur.y = self.cur.y.saturating_sub(1);
                     self.cur.x = self.rows.get(self.cur.y).map_or(0, |row| row.len());
@@ -312,7 +416,7 @@ impl Ked {
                     self.cur.x -= 1;
                 }
             }
-            keys::RIGHT => {
+            keys::Key::Arrow(keys::Dir::Right) => {
                 if self.cur.x == row.map_or(self.cur.x, |row| row.len()) {
                     self.cur.y = (self.cur.y + 1).min(self.rows.len());
                     self.cur.x = 0;
@@ -320,12 +424,14 @@ impl Ked {
                     self.cur.x += 1;
                 }
             }
-            keys::PGUP => self.cur.y = self.cur.y.saturating_sub(self.screen_size.row as usize - 1),
-            keys::PGDOWN => {
+            keys::Key::Page(keys::Dir::Up) => {
+                self.cur.y = self.cur.y.saturating_sub(self.screen_size.row as usize - 1)
+            }
+            keys::Key::Page(keys::Dir::Down) => {
                 self.cur.y = (self.cur.y + self.screen_size.row as usize - 1).min(self.rows.len())
             }
-            keys::HOME => self.cur.x = 0,
-            keys::END => self.cur.x = row.map_or(0, |row| row.len()),
+            keys::Key::Home => self.cur.x = 0,
+            keys::Key::End => self.cur.x = row.map_or(0, |row| row.len()),
             _ => panic!("Unknown movement key"),
         }
         let row = self.rows.get(self.cur.y);
@@ -511,16 +617,19 @@ impl Ked {
         mut callback: Option<F>,
     ) -> KResult<Option<String>>
     where
-        F: FnMut(&mut Ked, &str, u32) -> KResult<()>,
+        F: FnMut(&mut Ked, &str, keys::Event) -> KResult<()>,
     {
         let mut user_inp = String::new();
         loop {
             self.set_status_message(format_args!("{prefix}{user_inp}{suffix}"));
             self.refresh_screen()?;
             let c = self.read_key()?;
-            log::trace!(target: "keytrace::prompt", "Key {c}");
+            log::trace!(target: "keytrace::prompt", "Key {c:?}");
             match c {
-                keys::CR => {
+                keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Enter,
+                    ..
+                }) => {
                     if !user_inp.is_empty() {
                         self.set_status_message(format_args!(""));
                         if let Some(callback) = callback.as_mut() {
@@ -530,25 +639,38 @@ impl Ked {
                         return Ok(Some(user_inp));
                     }
                 }
-                keys::ESC => {
+                keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Esc,
+                    ..
+                }) => {
                     // cancelled
                     if let Some(callback) = callback.as_mut() {
                         callback(self, &user_inp, c)?
                     }
                     return Ok(None);
                 }
-                k if k == ctrl_key(b'h') || k == keys::BACKSPACE => {
+                keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Chr('h'),
+                    modifiers: keys::Modifier::Ctrl,
+                })
+                | keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Backspace,
+                    ..
+                }) => {
                     if !user_inp.is_empty() {
                         user_inp.truncate(user_inp.len() - 1)
                     };
                 }
-                _ => {
-                    if c <= 128 {
-                        let ch: char = char::from_u32(c).expect("invalid char");
-                        if !ch.is_control() {
-                            user_inp.push(ch);
-                        }
+                keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Chr(ch),
+                    ..
+                }) => {
+                    if !ch.is_control() {
+                        user_inp.push(ch);
                     }
+                }
+                _ => {
+                    // ignore
                 }
             }
             if let Some(callback) = callback.as_mut() {
@@ -760,24 +882,49 @@ impl Ked {
         let mut last_match: Option<Pos> = None;
         let mut direction = SearchDir::Forward;
 
-        let callback = |ked: &mut Ked, query: &str, key: u32| -> KResult<()> {
-            log::trace!(target: "find::cb", "callback on '{query}' with {key}");
-            if key == keys::ESC {
-                ked.set_status_message(format_args!("Search cancelled."));
-                return Ok(());
-            } else if key == keys::CR {
-                return Ok(());
-            } else if key == keys::RIGHT || key == keys::DOWN {
-                log::trace!(target: "find::cb", "searchdir forward");
-                direction = SearchDir::Forward;
-            } else if key == keys::LEFT || key == keys::UP {
-                log::trace!(target: "find::cb", "searchdir back");
-                direction = SearchDir::Back;
-            } else {
-                // got new char added to query, reset state
-                log::trace!(target: "find::cb", "reset last_match");
-                last_match = None;
-                direction = SearchDir::Forward;
+        let callback = |ked: &mut Ked, query: &str, key: keys::Event| -> KResult<()> {
+            log::trace!(target: "find::cb", "callback on '{query}' with {key:?}");
+            match key {
+                keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Esc,
+                    ..
+                }) => {
+                    ked.set_status_message(format_args!("Search cancelled."));
+                    return Ok(());
+                }
+                keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Enter,
+                    ..
+                }) => {
+                    return Ok(());
+                }
+                keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Arrow(keys::Dir::Down | keys::Dir::Right),
+                    ..
+                }) => {
+                    log::trace!(target: "find::cb", "searchdir forward");
+                    direction = SearchDir::Forward;
+                }
+                keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Arrow(keys::Dir::Up | keys::Dir::Left),
+                    ..
+                }) => {
+                    log::trace!(target: "find::cb", "searchdir back");
+                    direction = SearchDir::Back;
+                }
+                keys::Event::Key(keys::KeyEvent {
+                    key: keys::Key::Chr(_),
+                    ..
+                }) => {
+                    // got new char added to query, reset state
+                    log::trace!(target: "find::cb", "reset last_match");
+                    last_match = None;
+                    direction = SearchDir::Forward;
+                }
+                _ => {
+                    // ignore
+                    return Ok(());
+                }
             }
             let numrows = ked.rows.len();
             let rows_iter = ked.rows.iter().enumerate();
