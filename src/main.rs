@@ -4,6 +4,7 @@
 #![feature(once_cell)]
 
 mod error;
+mod utils;
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -16,6 +17,7 @@ use log::error;
 use termios::{self, Termios};
 
 use crate::error::{KError, KResult, VoidResult};
+use crate::utils::MinMax;
 
 const STDIN_FD: RawFd = libc::STDIN_FILENO;
 const STDOUT_FD: RawFd = libc::STDOUT_FILENO;
@@ -620,18 +622,14 @@ impl Ked {
                     )?;
                 }
                 // only show the line if it is visible region
-                if self.coloff <= row.len() {
+                if self.coloff < row.len() {
                     // need to clip manually. using std::fmt's width option causes line wraps.
                     let clip_end = row
                         .len()
                         .min(self.coloff + (self.screen_size.col as usize - gutter_width));
                     let clipped = &row[self.coloff..clip_end];
-                    if let Some((start, end)) = self.highlight.as_ref() {
-                        let (start, end) = if start < end {
-                            (start, end)
-                        } else {
-                            (end, start)
-                        };
+                    if let Some(hl) = self.highlight.as_ref() {
+                        let (start, end) = hl.min_max();
                         if start.y < y && y < end.y {
                             // line is completely highlighted
                             esc_write!(self.buf, INVERT_COLOR)?;
