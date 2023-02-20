@@ -418,6 +418,10 @@ impl Ked {
             Event::Key(KeyEvent { key: Esc, .. }) => {}
 
             Event::Key(KeyEvent { key: Chr(ch), .. }) => {
+                if self.highlight.is_some() {
+                    // first, remove the selected range
+                    self.del_char();
+                }
                 self.insert_char(ch);
             }
             Event::Mouse(MouseEvent {
