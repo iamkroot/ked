@@ -105,6 +105,8 @@ mod keys {
     pub(crate) enum MouseEventKind {
         Press(MouseButton),
         Release(MouseButton),
+        Drag(MouseButton),
+        Moved,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,10 +167,10 @@ struct TermSize {
     _y: libc::c_ushort,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Pos {
-    x: usize,
     y: usize,
+    x: usize,
 }
 
 struct Ked {
@@ -188,6 +190,8 @@ struct Ked {
     dirty_count: u32,
     quit_count: u32,
     show_line_nums: bool,
+    /// Range of highlighting, if any
+    highlight: Option<(Pos, Pos)>,
 }
 
 const TAB_STOP: usize = 4;
@@ -221,6 +225,7 @@ impl Ked {
             dirty_count: 0,
             quit_count: QUIT_TIMES,
             show_line_nums: false,
+            highlight: None,
         })
     }
 
@@ -244,19 +249,17 @@ impl Ked {
     }
 
     fn enable_mouse_events(&mut self) -> VoidResult {
-        esc_write!(self.stdout, "?1000h")?;
         esc_write!(self.stdout, "?1002h")?;
         Ok(())
     }
 
     fn disable_mouse_events(&mut self) -> VoidResult {
         esc_write!(self.stdout, "?1002l")?;
-        esc_write!(self.stdout, "?1000l")?;
         Ok(())
     }
 
     fn read_key(&mut self) -> KResult<keys::Event> {
-        use keys::{Dir::*, Event, Key::*, KeyEvent, MouseEvent};
+        use keys::{Dir::*, Event, Key::*, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
         let mut buf = [0; 6];
         let mut n: usize;
         // block till we read *something*
@@ -280,19 +283,29 @@ impl Ked {
                 b"3~" => Event::Key(KeyEvent::new(Delete)),
                 b"5~" => Event::Key(KeyEvent::new(Page(Up))),
                 b"6~" => Event::Key(KeyEvent::new(Page(Down))),
-                _ if n == 6 => match &buf[2..4] {
-                    // mouse button
-                    b"M " | b"M#" => {
+                _ if n == 6 => match buf[2] {
+                    b'M' => {
                         let row = usize::from(buf[4]).saturating_sub(32) - 1;
                         let col = usize::from(buf[5]).saturating_sub(32) - 1;
                         let pos = Pos { x: row, y: col };
-                        let kind = if buf[3] == b' ' {
-                            log::info!(target: "read_key", "Mouse press at coords: {pos:?}");
-                            keys::MouseEventKind::Press(keys::MouseButton::Left)
-                        } else {
-                            log::info!(target: "read_key", "Mouse release at coords: {pos:?}");
-                            keys::MouseEventKind::Release(keys::MouseButton::Left)
+                        let button = (buf[3] & 0b0000_0011) | ((buf[3] & 0b1100_0000) >> 4);
+                        let dragging = (buf[3] & 0b0110_0000) > 0;
+                        log::trace!(target: "read_key", "Mouse {button} is dragging: {dragging} {} {}", buf[3], buf[3] & 32);
+                        let kind = match (button, dragging) {
+                            (0, false) => MouseEventKind::Press(MouseButton::Left),
+                            (1, false) => MouseEventKind::Press(MouseButton::Right),
+                            (2, false) => MouseEventKind::Press(MouseButton::Middle),
+                            (0, true) => MouseEventKind::Drag(MouseButton::Left),
+                            (1, true) => MouseEventKind::Drag(MouseButton::Right),
+                            (2, true) => MouseEventKind::Drag(MouseButton::Middle),
+                            (3, _) => MouseEventKind::Release(MouseButton::Left),
+                            (4 | 5, true) => MouseEventKind::Moved,
+                            _ => {
+                                log::warn!("Unknown mouse event: {buf:?}");
+                                MouseEventKind::Release(MouseButton::Left)
+                            }
                         };
+                        log::info!(target: "read_key", "Mouse event {kind:?} at coords: {pos:?}");
                         Event::Mouse(MouseEvent::new(kind, pos))
                     }
                     _ => Event::Key(KeyEvent::new(Esc)),
@@ -396,6 +409,16 @@ impl Ked {
                 self.insert_char(ch);
             }
             Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Drag(_),
+                pos,
+                ..
+            }) => {
+                if pos.y < self.screen_size.row as usize {
+                    self.highlight = Some((pos, pos));
+                    log::trace!(target: "mouse", "Starting highlighting");
+                }
+            }
+            Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Release(_),
                 pos,
                 ..
@@ -405,8 +428,25 @@ impl Ked {
                     self.cur.y = pos.y;
                     self.cur.x = pos.x - gutter_width;
                 }
+                if let Some((_, end)) = self.highlight.as_mut() {
+                    *end = pos;
+                    log::trace!(target: "mouse", "Ended highlighting");
+                }
             }
-            // ignore presses for now
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                pos,
+                ..
+            }) => {
+                let gutter_width = self.gutter_width()?;
+                if pos.x >= gutter_width {
+                    self.cur.y = pos.y;
+                    self.cur.x = pos.x - gutter_width;
+                }
+                if let Some((_, end)) = self.highlight.as_mut() {
+                    *end = pos;
+                }
+            }
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Press(_),
                 ..
@@ -568,7 +608,44 @@ impl Ked {
                         .len()
                         .min(self.coloff + (self.screen_size.col as usize - gutter_width));
                     let clipped = &row[self.coloff..clip_end];
-                    write!(self.buf, "{clipped}")?;
+                    if let Some((start, end)) = self.highlight.as_ref() {
+                        let (start, end) = if start < end {
+                            (start, end)
+                        } else {
+                            (end, start)
+                        };
+                        if start.y < y && y < end.y {
+                            // line is completely highlighted
+                            esc_write!(self.buf, INVERT_COLOR)?;
+                            write!(self.buf, "{clipped}")?;
+                            esc_write!(self.buf, NORMAL_COLOR)?;
+                        } else if start.y == y && end.y == y {
+                            let split1 = start.x.saturating_sub(gutter_width);
+                            let split2 = end.x.saturating_sub(gutter_width);
+                            write!(self.buf, "{}", &clipped[..split1])?;
+                            esc_write!(self.buf, INVERT_COLOR)?;
+                            write!(self.buf, "{}", &clipped[split1..split2])?;
+                            esc_write!(self.buf, NORMAL_COLOR)?;
+                            write!(self.buf, "{}", &clipped[split2..])?;
+                        } else if start.y == y {
+                            let split = start.x.saturating_sub(gutter_width);
+                            write!(self.buf, "{}", &clipped[..split])?;
+                            esc_write!(self.buf, INVERT_COLOR)?;
+                            write!(self.buf, "{}", &clipped[split..])?;
+                            esc_write!(self.buf, NORMAL_COLOR)?;
+                        } else if end.y == y {
+                            let split = end.x.saturating_sub(gutter_width);
+                            esc_write!(self.buf, INVERT_COLOR)?;
+                            write!(self.buf, "{}", &clipped[..split])?;
+                            esc_write!(self.buf, NORMAL_COLOR)?;
+                            write!(self.buf, "{}", &clipped[split..])?;
+                        } else {
+                            // line is outside the selection range
+                            write!(self.buf, "{clipped}")?;
+                        }
+                    } else {
+                        write!(self.buf, "{clipped}")?;
+                    }
                 }
             }
             esc_write!(self.buf, CLEAR_TRAIL_LINE)?;

@@ -16,9 +16,9 @@ Most of the current code is a direct port of this tutorial.
 ## TODOs
 A whimsical list of improvements I'd like to implement-
 - [x] Line numbers
-- [ ] Mouse events
+- [x] Mouse events
     - [x] Simple cursor movement
-    - [ ] Drag to highlight
+    - [x] Drag to highlight
 - [ ] Cursor position history ([this](https://austinhenley.com/blog/images/textcursor.gif))
 - [ ] Undo and redo
 - [ ] Cut, copy, and paste
