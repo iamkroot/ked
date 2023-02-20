@@ -194,8 +194,8 @@ struct Ked {
     dirty_count: u32,
     quit_count: u32,
     show_line_nums: bool,
-    /// Range of highlighting (in file coordinates), if any
-    highlight: Option<(Pos, Pos)>,
+    /// Range of selectioning (in file coordinates), if any
+    selection: Option<(Pos, Pos)>,
 }
 
 const TAB_STOP: usize = 4;
@@ -229,7 +229,7 @@ impl Ked {
             dirty_count: 0,
             quit_count: QUIT_TIMES,
             show_line_nums: false,
-            highlight: None,
+            selection: None,
         })
     }
 
@@ -391,7 +391,7 @@ impl Ked {
                 modifiers: Ctrl,
             })
             | Event::Key(KeyEvent { key: Backspace, .. }) => {
-                if self.cur.y == self.rows.len() && self.highlight.is_none() {
+                if self.cur.y == self.rows.len() && self.selection.is_none() {
                     // we are at the dummy row, move back.
                     self.move_cursor(Arrow(keys::Dir::Left));
                 } else {
@@ -399,7 +399,7 @@ impl Ked {
                 }
             }
             Event::Key(KeyEvent { key: Delete, .. }) => {
-                if self.highlight.is_none()
+                if self.selection.is_none()
                     && !self.rows.is_empty()
                     && self.cur.y == self.rows.len() - 1
                     && self.cur.x == self.rows.last().unwrap().len()
@@ -415,10 +415,13 @@ impl Ked {
                 ..
             }) => self.move_cursor(c),
             // Ignore ESC
-            Event::Key(KeyEvent { key: Esc, .. }) => {}
+            Event::Key(KeyEvent { key: Esc, .. }) => {
+                // disable the selection
+                self.selection.take();
+            }
 
             Event::Key(KeyEvent { key: Chr(ch), .. }) => {
-                if self.highlight.is_some() {
+                if self.selection.is_some() {
                     // first, remove the selected range
                     self.del_char();
                 }
@@ -440,8 +443,8 @@ impl Ked {
                             .saturating_sub(gutter_width)
                             .min(self.rows[pos.y].len());
                     }
-                    self.highlight = Some((pos, pos));
-                    log::trace!(target: "mouse", "Starting highlighting");
+                    self.selection = Some((pos, pos));
+                    log::trace!(target: "mouse", "Starting selection");
                 }
                 self.cur.x = pos.x;
                 self.cur.y = pos.y.min(self.rows.len());
@@ -452,7 +455,7 @@ impl Ked {
                 ..
             }) => {
                 let gutter_width = self.gutter_width()?;
-                if let Some((start, end)) = self.highlight.as_mut() {
+                if let Some((start, end)) = self.selection.as_mut() {
                     if pos.y >= self.rows.len() {
                         pos.y = self.rows.len();
                         pos.x = 0;
@@ -463,7 +466,12 @@ impl Ked {
                             .min(self.rows[pos.y].len());
                     }
                     *end = pos;
-                    log::trace!(target: "mouse", "Ended highlighting: {:?} {:?}", start, end);
+                    if start == end {
+                        // no selection
+                        self.selection.take();
+                    } else {
+                        log::trace!(target: "mouse", "Ended selection: {:?} {:?}", start, end);
+                    }
                 }
                 self.cur.x = pos.x;
                 self.cur.y = pos.y.min(self.rows.len());
@@ -474,7 +482,7 @@ impl Ked {
                 ..
             }) => {
                 let gutter_width = self.gutter_width()?;
-                if let Some((_, end)) = self.highlight.as_mut() {
+                if let Some((_, end)) = self.selection.as_mut() {
                     if pos.y >= self.rows.len() {
                         pos.y = self.rows.len();
                         pos.x = 0;
@@ -651,10 +659,10 @@ impl Ked {
                         .len()
                         .min(self.coloff + (self.screen_size.col as usize - gutter_width));
                     let clipped = &row[self.coloff..clip_end];
-                    if let Some(hl) = self.highlight.as_ref() {
+                    if let Some(hl) = self.selection.as_ref() {
                         let (start, end) = hl.min_max();
                         if start.y < y && y < end.y {
-                            // line is completely highlighted
+                            // line is completely selected
                             esc_write!(self.buf, INVERT_COLOR)?;
                             write!(self.buf, "{clipped}")?;
                             esc_write!(self.buf, NORMAL_COLOR)?;
@@ -921,7 +929,7 @@ impl Ked {
             log::trace!(target: "edit::delete", "Nothing to delete!");
             return;
         }
-        if let Some(hl) = self.highlight.take() {
+        if let Some(hl) = self.selection.take() {
             log::trace!(target: "edit::delete", "Deleting selection between {hl:?}");
             let (start, end) = hl.min_max();
             if start.y >= self.rows.len() {
