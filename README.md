@@ -15,7 +15,7 @@ Most of the current code is a direct port of this tutorial.
 
 ## TODOs
 A whimsical list of improvements I'd like to implement-
-- [ ] Line numbers
+- [x] Line numbers
 - [ ] Mouse events
     - [ ] Simple cursor movement
     - [ ] Drag to highlight

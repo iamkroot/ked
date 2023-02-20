@@ -120,6 +120,7 @@ struct Ked {
     status_msg: (String, Instant),
     dirty_count: u32,
     quit_count: u32,
+    show_line_nums: bool,
 }
 
 const TAB_STOP: usize = 4;
@@ -152,6 +153,7 @@ impl Ked {
             status_msg: (Default::default(), Instant::now()),
             dirty_count: 0,
             quit_count: QUIT_TIMES,
+            show_line_nums: false,
         })
     }
 
@@ -173,8 +175,21 @@ impl Ked {
             error!("Failed to disable raw mode: {e}");
         });
     }
+
+    fn enable_mouse_events(&mut self) -> VoidResult {
+        esc_write!(self.stdout, "?1000h")?;
+        esc_write!(self.stdout, "?1002h")?;
+        Ok(())
+    }
+
+    fn disable_mouse_events(&mut self) -> VoidResult {
+        esc_write!(self.stdout, "?1002l")?;
+        esc_write!(self.stdout, "?1000l")?;
+        Ok(())
+    }
+
     fn read_key(&mut self) -> KResult<u32> {
-        let mut buf = [0; 4];
+        let mut buf = [0; 6];
         let mut n: usize;
         // block till we read *something*
         loop {
@@ -183,6 +198,7 @@ impl Ked {
                 break;
             }
         }
+        log::trace!(target: "read_key", "readkey {buf:?}");
         let key: u32 = match &buf[0..2] {
             b"\x1b[" => match &buf[2..n] {
                 b"A" => keys::UP,
@@ -196,8 +212,25 @@ impl Ked {
                 b"3~" => keys::DELETE,
                 b"5~" => keys::PGUP,
                 b"6~" => keys::PGDOWN,
+                _ if n == 6 => {
+                    match &buf[2..4] {
+                        b"M " | b"M#" => {
+                            let row = usize::from(buf[4]).saturating_sub(32) - 1;
+                            let col = usize::from(buf[5]).saturating_sub(32) - 1;
+                            let pos = Pos { x: row, y: col };
+                            if buf[3] == b' ' {
+                                log::info!(target: "read_key", "Mouse press at coords: {pos:?}");
+                            } else {
+                                log::info!(target: "read_key", "Mouse release at coords: {pos:?}");
+                            }
+                            // TODO: Return the keys correctly
+                            keys::ESC
+                        }
+                        _ => keys::ESC,
+                    }
+                }
                 _ => {
-                    log::warn!("Weird data on stdin: {buf:?}");
+                    log::warn!(target: "read_key", "Weird data on stdin: {buf:?}");
                     b'\x1b' as _
                 }
             },
@@ -230,6 +263,10 @@ impl Ked {
             }
             k if k == ctrl_key(b's') => self.save()?,
             k if k == ctrl_key(b'f') => self.find()?,
+            k if k == ctrl_key(b'l') => {
+                self.show_line_nums = !self.show_line_nums;
+            }
+
             k if k == ctrl_key(b'h') || k == keys::BACKSPACE => {
                 if self.cur.y == self.rows.len() {
                     // we are at the dummy row, move back.
@@ -303,7 +340,7 @@ impl Ked {
         Ok(())
     }
 
-    fn scroll_screen(&mut self) {
+    fn scroll_screen(&mut self) -> KResult<()> {
         // convert from "document" coordinate to "rendered" coordinate
         self.render_pos_x = self.rows.get(self.cur.y).map_or(0, |row| {
             row.chars().take(self.cur.x).fold(0, |acc, c| {
@@ -320,17 +357,19 @@ impl Ked {
             self.rowoff = self.cur.y.saturating_sub(self.screen_size.row as usize) + 1;
         }
         self.coloff = self.coloff.min(self.render_pos_x);
-        if self.render_pos_x >= self.coloff + self.screen_size.col as usize {
+        let gutter_width = self.gutter_width()?;
+        if self.render_pos_x >= self.coloff + (self.screen_size.col as usize - gutter_width) {
             self.coloff = self
                 .render_pos_x
-                .saturating_sub(self.screen_size.col as usize)
+                .saturating_sub(self.screen_size.col as usize - gutter_width)
                 + 1;
         }
+        Ok(())
     }
 
     fn refresh_screen(&mut self) -> VoidResult {
         self.buf.clear();
-        self.scroll_screen();
+        self.scroll_screen()?;
         esc_write!(self.buf, HIDE_CURSOR)?;
         esc_write!(self.buf, RESET_CURSOR)?;
         self.draw_rows()?;
@@ -343,16 +382,32 @@ impl Ked {
         Ok(())
     }
 
+    /// Calculate width of the gutter where line numbers will be shown.
+    fn gutter_width(&self) -> KResult<usize> {
+        let gutter_width = if self.show_line_nums && !self.rows.is_empty() {
+            2 + // '| ' separator width
+            (self.rows.len().ilog10() as usize + 1)
+        } else {
+            0
+        };
+        if self.screen_size.col as usize <= gutter_width {
+            Err(KError::SimpleMessage("Terminal is too narrow!"))
+        } else {
+            Ok(gutter_width)
+        }
+    }
+
     /// Write into `self.buf` the escape sequence needed to move cursor to `self.cur`.
     ///
     /// * Assumes `self.cur` is 0-indexed, whereas the terminal cursor needs to be 1-indexed.
     /// * Also transforms `self.cur.y` into `row` and `self.render_pos_x` into `col`.
     fn write_move_cur(&mut self) -> VoidResult {
+        let gutter_width = self.gutter_width()?;
         write!(
             self.buf,
             "\x1b[{};{}H",
             self.cur.y - self.rowoff + 1,
-            self.render_pos_x - self.coloff + 1
+            self.render_pos_x - self.coloff + 1 + gutter_width,
         )?;
         Ok(())
     }
@@ -363,6 +418,7 @@ impl Ked {
     }
 
     fn draw_rows(&mut self) -> VoidResult {
+        let gutter_width = self.gutter_width()?;
         for y in 0..self.screen_size.row as usize {
             let filerow = y + self.rowoff;
             if filerow >= self.rows.len() {
@@ -378,10 +434,20 @@ impl Ked {
                 }
             } else {
                 let row = &self.render_rows[filerow];
+                if self.show_line_nums {
+                    write!(
+                        self.buf,
+                        "{:>width$}| ",
+                        filerow + 1,
+                        width = gutter_width - 2
+                    )?;
+                }
                 // only show the line if it is visible region
                 if self.coloff <= row.len() {
                     // need to clip manually. using std::fmt's width option causes line wraps.
-                    let clip_end = row.len().min(self.coloff + self.screen_size.col as usize);
+                    let clip_end = row
+                        .len()
+                        .min(self.coloff + (self.screen_size.col as usize - gutter_width));
                     let clipped = &row[self.coloff..clip_end];
                     write!(self.buf, "{clipped}")?;
                 }
@@ -756,7 +822,7 @@ impl Ked {
                 log::trace!(target: "find::cb", "found match {match_pos:?}");
                 last_match = Some(match_pos);
                 ked.cur = match_pos;
-                ked.scroll_screen();
+                ked.scroll_screen()?;
             }
             Ok(())
         };
@@ -767,7 +833,7 @@ impl Ked {
             self.cur = saved_pos;
             self.coloff = coloff;
             self.rowoff = rowoff;
-            self.scroll_screen();
+            self.scroll_screen()?;
         }
         Ok(())
     }
@@ -795,11 +861,12 @@ fn main() -> VoidResult {
         .init();
 
     let mut ked = Ked::new()?;
+    enable_raw_mode().expect("failed to enable raw");
+
     if let Some(path) = std::env::args().nth(1) {
         ked.open(path)?;
     }
     ked.set_status_message(format_args!("HELP: Press Ctrl+q to quit"));
-    enable_raw_mode().expect("failed to enable raw");
     loop {
         ked.refresh_screen()?;
         if let Err(e) = ked.process_key() {
