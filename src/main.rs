@@ -410,42 +410,59 @@ impl Ked {
             }
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Drag(_),
-                pos,
+                mut pos,
                 ..
             }) => {
-                if pos.y < self.screen_size.row as usize {
+                let gutter_width = self.gutter_width()?;
+                if !self.rows.is_empty() && pos.y < self.screen_size.row as usize {
+                    if pos.y >= self.rows.len() {
+                        pos.y = self.rows.len();
+                        pos.x = 0;
+                    } else {
+                        pos.x = pos.x.min(self.rows[pos.y].len() + gutter_width);
+                    }
                     self.highlight = Some((pos, pos));
                     log::trace!(target: "mouse", "Starting highlighting");
                 }
+                self.cur.x = pos.x.saturating_sub(gutter_width);
+                self.cur.y = pos.y.min(self.rows.len());
             }
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Release(_),
-                pos,
+                mut pos,
                 ..
             }) => {
                 let gutter_width = self.gutter_width()?;
-                if pos.x >= gutter_width {
-                    self.cur.y = pos.y;
-                    self.cur.x = pos.x - gutter_width;
-                }
                 if let Some((_, end)) = self.highlight.as_mut() {
+                    if pos.y >= self.rows.len() {
+                        pos.y = self.rows.len();
+                        pos.x = 0;
+                    } else {
+                        pos.x = pos.x.min(self.rows[pos.y].len() + gutter_width);
+                    }
                     *end = pos;
                     log::trace!(target: "mouse", "Ended highlighting");
                 }
+                self.cur.x = pos.x.saturating_sub(gutter_width);
+                self.cur.y = pos.y.min(self.rows.len());
             }
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Moved,
-                pos,
+                mut pos,
                 ..
             }) => {
                 let gutter_width = self.gutter_width()?;
-                if pos.x >= gutter_width {
-                    self.cur.y = pos.y;
-                    self.cur.x = pos.x - gutter_width;
-                }
                 if let Some((_, end)) = self.highlight.as_mut() {
+                    if pos.y >= self.rows.len() {
+                        pos.y = self.rows.len();
+                        pos.x = 0;
+                    } else {
+                        pos.x = pos.x.min(self.rows[pos.y].len() + gutter_width);
+                    }
                     *end = pos;
                 }
+                self.cur.x = pos.x.saturating_sub(gutter_width);
+                self.cur.y = pos.y.min(self.rows.len());
             }
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Press(_),
