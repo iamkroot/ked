@@ -1,6 +1,7 @@
 #![feature(io_error_downcast)]
 #![feature(write_all_vectored)]
 #![feature(get_many_mut)]
+#![feature(once_cell)]
 
 mod error;
 
@@ -1105,7 +1106,7 @@ impl Drop for Ked {
     }
 }
 
-fn main() -> VoidResult {
+fn run() -> VoidResult {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1139,4 +1140,29 @@ fn main() -> VoidResult {
     }
     drop(ked);
     Ok(())
+}
+
+static BACKTRACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn panic_hook(_: &std::panic::PanicInfo) {
+    let _ = BACKTRACE.set(std::backtrace::Backtrace::force_capture().to_string());
+}
+
+fn main() -> VoidResult {
+    std::panic::set_hook(Box::new(panic_hook));
+    std::panic::catch_unwind(run).unwrap_or_else(|e| {
+        let panic_information = match e.downcast::<String>() {
+            Ok(v) => *v,
+            Err(e) => match e.downcast::<&str>() {
+                Ok(v) => v.to_string(),
+                _ => "Unknown Source of Error".to_owned(),
+            },
+        };
+
+        log::error!("Panicked! {}", panic_information);
+        if let Some(bt) = BACKTRACE.get() {
+            log::error!("Backtrace:\n{bt}");
+        }
+        Ok(())
+    })
 }
