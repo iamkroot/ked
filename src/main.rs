@@ -391,7 +391,7 @@ impl Ked {
                 modifiers: Ctrl,
             })
             | Event::Key(KeyEvent { key: Backspace, .. }) => {
-                if self.cur.y == self.rows.len() {
+                if self.cur.y == self.rows.len() && self.highlight.is_none() {
                     // we are at the dummy row, move back.
                     self.move_cursor(Arrow(keys::Dir::Left));
                 } else {
@@ -399,8 +399,16 @@ impl Ked {
                 }
             }
             Event::Key(KeyEvent { key: Delete, .. }) => {
-                self.move_cursor(Arrow(keys::Dir::Right));
-                self.del_char();
+                if self.highlight.is_none()
+                    && !self.rows.is_empty()
+                    && self.cur.y == self.rows.len() - 1
+                    && self.cur.x == self.rows.last().unwrap().len()
+                {
+                    // do nothing
+                } else {
+                    self.move_cursor(Arrow(keys::Dir::Right));
+                    self.del_char();
+                }
             }
             Event::Key(KeyEvent {
                 key: c @ Arrow(_) | c @ Page(_) | c @ Home | c @ End,
@@ -905,6 +913,62 @@ impl Ked {
 
     /// Delete char that is to the left of the cursor.
     fn del_char(&mut self) {
+        if self.rows.is_empty() {
+            log::trace!(target: "edit::delete", "Nothing to delete!");
+            return;
+        }
+        if let Some(hl) = self.highlight.take() {
+            log::trace!(target: "edit::delete", "Deleting selection between {hl:?}");
+            let (start, end) = hl.min_max();
+            if start.y >= self.rows.len() {
+                // no need to do anything
+                log::trace!(target: "edit::delete", "Deleting outside num_rows, no-op");
+                return;
+            }
+            // special case for selection spanning only one line
+            if start.y == end.y {
+                let row = &mut self.rows[start.y];
+                let removed: String = row.drain(start.x..end.x).collect();
+                log::trace!(target: "edit::delete", "Deleted {removed:?}");
+                self.render_rows[start.y] = self.get_render(start.y);
+                self.cur = start;
+                self.dirty_count = self.dirty_count.saturating_add(1);
+                return;
+            }
+
+            // start deleting bottom to top.
+
+            // If the last line is partially deleted, we need to later merge it with the start line
+            let last_line_y = if end.y < self.rows.len() {
+                let last_line = &mut self.rows[end.y];
+                log::trace!(target: "edit::delete", "Deleting from last line: {:?}", &last_line[..end.x]);
+                *last_line = last_line[end.x..].to_string();
+                Some(start.y + 1)
+            } else {
+                None
+            };
+
+            // Delete the lines that are completely inside the selection
+            let full_delete = self.rows.drain(start.y + 1..end.y).count();
+            self.render_rows.drain(start.y + 1..end.y).count();
+            log::trace!(target: "edit::delete", "Deleted {} lines completely", full_delete);
+
+            let first_line = &mut self.rows[start.y];
+            if start.x < first_line.len() {
+                log::trace!(target: "edit::delete", "Deleting from first line: {:?}", &first_line[start.x..]);
+                *first_line = first_line[..start.x].to_string();
+            }
+            if let Some(y) = last_line_y {
+                // need to merge the lines, reuse logic for deleting a single char
+                self.cur = Pos { x: 0, y };
+            } else {
+                // No partial line, simply return after moving cursor to selection start pos
+                self.render_rows[start.y] = self.get_render(start.y);
+                self.cur = start;
+                self.dirty_count = self.dirty_count.saturating_add(1);
+                return;
+            }
+        }
         log::trace!(target: "edit::delete", "Deleting char at {:?}", self.cur);
         if self.cur.y >= self.rows.len() {
             // no need to do anything
