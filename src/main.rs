@@ -327,7 +327,7 @@ impl Ked {
     }
 
     fn process_key(&mut self) -> VoidResult {
-        use keys::{Event, Key::*, KeyEvent, Modifier::*};
+        use keys::{Event, Key::*, KeyEvent, Modifier::*, MouseEvent, MouseEventKind};
 
         let c = self.read_key()?;
         log::trace!(target: "keytrace", "Key {c:?}");
@@ -395,9 +395,22 @@ impl Ked {
             Event::Key(KeyEvent { key: Chr(ch), .. }) => {
                 self.insert_char(ch);
             }
-            Event::Mouse(_) => {
-                todo!("Handle mouse")
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Release(_),
+                pos,
+                ..
+            }) => {
+                let gutter_width = self.gutter_width()?;
+                if pos.x >= gutter_width {
+                    self.cur.y = pos.y;
+                    self.cur.x = pos.x - gutter_width;
+                }
             }
+            // ignore presses for now
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(_),
+                ..
+            }) => {}
         }
         self.quit_count = QUIT_TIMES;
         Ok(())
@@ -988,6 +1001,9 @@ impl Ked {
 
 impl Drop for Ked {
     fn drop(&mut self) {
+        self.disable_mouse_events().unwrap_or_else(|e| {
+            error!("Failed to disable mouse events: {e}");
+        });
         self.clear_screen().unwrap_or_else(|e| {
             error!("Failed to clear screen on exit: {e}");
         });
@@ -1009,7 +1025,7 @@ fn main() -> VoidResult {
 
     let mut ked = Ked::new()?;
     enable_raw_mode().expect("failed to enable raw");
-
+    ked.enable_mouse_events()?;
     if let Some(path) = std::env::args().nth(1) {
         ked.open(path)?;
     }
