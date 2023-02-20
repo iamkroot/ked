@@ -194,7 +194,7 @@ struct Ked {
     dirty_count: u32,
     quit_count: u32,
     show_line_nums: bool,
-    /// Range of highlighting, if any
+    /// Range of highlighting (in file coordinates), if any
     highlight: Option<(Pos, Pos)>,
 }
 
@@ -423,12 +423,15 @@ impl Ked {
                         pos.y = self.rows.len();
                         pos.x = 0;
                     } else {
-                        pos.x = pos.x.min(self.rows[pos.y].len() + gutter_width);
+                        pos.x = pos
+                            .x
+                            .saturating_sub(gutter_width)
+                            .min(self.rows[pos.y].len());
                     }
                     self.highlight = Some((pos, pos));
                     log::trace!(target: "mouse", "Starting highlighting");
                 }
-                self.cur.x = pos.x.saturating_sub(gutter_width);
+                self.cur.x = pos.x;
                 self.cur.y = pos.y.min(self.rows.len());
             }
             Event::Mouse(MouseEvent {
@@ -437,17 +440,20 @@ impl Ked {
                 ..
             }) => {
                 let gutter_width = self.gutter_width()?;
-                if let Some((_, end)) = self.highlight.as_mut() {
+                if let Some((start, end)) = self.highlight.as_mut() {
                     if pos.y >= self.rows.len() {
                         pos.y = self.rows.len();
                         pos.x = 0;
                     } else {
-                        pos.x = pos.x.min(self.rows[pos.y].len() + gutter_width);
+                        pos.x = pos
+                            .x
+                            .saturating_sub(gutter_width)
+                            .min(self.rows[pos.y].len());
                     }
                     *end = pos;
-                    log::trace!(target: "mouse", "Ended highlighting");
+                    log::trace!(target: "mouse", "Ended highlighting: {:?} {:?}", start, end);
                 }
-                self.cur.x = pos.x.saturating_sub(gutter_width);
+                self.cur.x = pos.x;
                 self.cur.y = pos.y.min(self.rows.len());
             }
             Event::Mouse(MouseEvent {
@@ -461,11 +467,14 @@ impl Ked {
                         pos.y = self.rows.len();
                         pos.x = 0;
                     } else {
-                        pos.x = pos.x.min(self.rows[pos.y].len() + gutter_width);
+                        pos.x = pos
+                            .x
+                            .saturating_sub(gutter_width)
+                            .min(self.rows[pos.y].len());
                     }
                     *end = pos;
                 }
-                self.cur.x = pos.x.saturating_sub(gutter_width);
+                self.cur.x = pos.x;
                 self.cur.y = pos.y.min(self.rows.len());
             }
             Event::Mouse(MouseEvent {
@@ -638,21 +647,21 @@ impl Ked {
                             write!(self.buf, "{clipped}")?;
                             esc_write!(self.buf, NORMAL_COLOR)?;
                         } else if start.y == y && end.y == y {
-                            let split1 = start.x.saturating_sub(gutter_width);
-                            let split2 = end.x.saturating_sub(gutter_width);
+                            let split1 = start.x;
+                            let split2 = end.x;
                             write!(self.buf, "{}", &clipped[..split1])?;
                             esc_write!(self.buf, INVERT_COLOR)?;
                             write!(self.buf, "{}", &clipped[split1..split2])?;
                             esc_write!(self.buf, NORMAL_COLOR)?;
                             write!(self.buf, "{}", &clipped[split2..])?;
                         } else if start.y == y {
-                            let split = start.x.saturating_sub(gutter_width);
+                            let split = start.x;
                             write!(self.buf, "{}", &clipped[..split])?;
                             esc_write!(self.buf, INVERT_COLOR)?;
                             write!(self.buf, "{}", &clipped[split..])?;
                             esc_write!(self.buf, NORMAL_COLOR)?;
                         } else if end.y == y {
-                            let split = end.x.saturating_sub(gutter_width);
+                            let split = end.x;
                             esc_write!(self.buf, INVERT_COLOR)?;
                             write!(self.buf, "{}", &clipped[..split])?;
                             esc_write!(self.buf, NORMAL_COLOR)?;
