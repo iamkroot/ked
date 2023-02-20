@@ -686,14 +686,22 @@ impl Ked {
         let start_len = self.buf.len();
         write_trim!(self.buf, name, MAX_NAME_WIDTH)?;
         if self.filepath.is_some() {
-            write!(self.buf, " - {} lines", self.rows.len())?;
+            write!(
+                self.buf,
+                " - {} line{}",
+                self.rows.len(),
+                if self.rows.len() == 1 { "" } else { "s" }
+            )?;
+        }
+        if self.dirty_count > 0 {
+            write!(self.buf, " (modified)")?;
         }
         let end_len = self.buf.len();
 
         // format the rstatus into a buf first
         let rstatus: &mut [u8] = &mut [0u8; 40];
         let mut cur = std::io::Cursor::new(rstatus);
-        write!(cur, "{}/{}", self.cur.y + 1, self.rows.len())?;
+        write!(cur, "Ln{}, Col{}", self.cur.y + 1, self.cur.x + 1)?;
         let num_rbytes = cur.position() as usize;
         let rstatus = cur.into_inner();
 
