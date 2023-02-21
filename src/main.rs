@@ -196,6 +196,8 @@ struct Ked {
     show_line_nums: bool,
     /// Range of selectioning (in file coordinates), if any
     selection: Option<(Pos, Pos)>,
+    /// Store the cursor x coord on navigating up/down
+    cursor_hist_x: Option<usize>,
 }
 
 const TAB_STOP: usize = 4;
@@ -230,6 +232,7 @@ impl Ked {
             quit_count: QUIT_TIMES,
             show_line_nums: false,
             selection: None,
+            cursor_hist_x: None,
         })
     }
 
@@ -454,6 +457,7 @@ impl Ked {
                 mut pos,
                 ..
             }) => {
+                self.cursor_hist_x.take();
                 let gutter_width = self.gutter_width()?;
                 if let Some((start, end)) = self.selection.as_mut() {
                     if pos.y >= self.rows.len() {
@@ -507,11 +511,12 @@ impl Ked {
     }
 
     fn move_cursor(&mut self, key: keys::Key) {
+        use keys::Dir::*;
         let row = self.rows.get(self.cur.y);
         match key {
-            keys::Key::Arrow(keys::Dir::Up) => self.cur.y = self.cur.y.saturating_sub(1),
-            keys::Key::Arrow(keys::Dir::Down) => self.cur.y = (self.cur.y + 1).min(self.rows.len()),
-            keys::Key::Arrow(keys::Dir::Left) => {
+            keys::Key::Arrow(Up) => self.cur.y = self.cur.y.saturating_sub(1),
+            keys::Key::Arrow(Down) => self.cur.y = (self.cur.y + 1).min(self.rows.len()),
+            keys::Key::Arrow(Left) => {
                 if self.cur.x == 0 {
                     self.cur.y = self.cur.y.saturating_sub(1);
                     self.cur.x = self.rows.get(self.cur.y).map_or(0, |row| row.len());
@@ -519,7 +524,7 @@ impl Ked {
                     self.cur.x -= 1;
                 }
             }
-            keys::Key::Arrow(keys::Dir::Right) => {
+            keys::Key::Arrow(Right) => {
                 if self.cur.x == row.map_or(self.cur.x, |row| row.len()) {
                     self.cur.y = (self.cur.y + 1).min(self.rows.len());
                     self.cur.x = 0;
@@ -527,10 +532,10 @@ impl Ked {
                     self.cur.x += 1;
                 }
             }
-            keys::Key::Page(keys::Dir::Up) => {
+            keys::Key::Page(Up) => {
                 self.cur.y = self.cur.y.saturating_sub(self.screen_size.row as usize - 1)
             }
-            keys::Key::Page(keys::Dir::Down) => {
+            keys::Key::Page(Down) => {
                 self.cur.y = (self.cur.y + self.screen_size.row as usize - 1).min(self.rows.len())
             }
             keys::Key::Home => self.cur.x = 0,
@@ -538,7 +543,20 @@ impl Ked {
             _ => panic!("Unknown movement key"),
         }
         let row = self.rows.get(self.cur.y);
-        self.cur.x = self.cur.x.min(row.map_or(0, |row| row.len()));
+        let row_len = row.map_or(0, |row| row.len());
+
+        if matches!(key, keys::Key::Arrow(Up | Down)) {
+            if let Some(old_x) = self.cursor_hist_x {
+                // restore the cursor
+                self.cur.x = old_x.min(row_len);
+            } else {
+                // store the cursor into x
+                self.cursor_hist_x = Some(self.cur.x);
+            }
+        } else {
+            self.cursor_hist_x.take();
+            self.cur.x = self.cur.x.min(row_len);
+        }
     }
 
     fn clear_screen(&mut self) -> VoidResult {

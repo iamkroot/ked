@@ -19,7 +19,7 @@ A whimsical list of improvements I'd like to implement-
 - [x] Mouse events
     - [x] Simple cursor movement
     - [x] Drag to highlight
-- [ ] Cursor position history ([this](https://austinhenley.com/blog/images/textcursor.gif))
+- [x] Cursor position history ([this](https://austinhenley.com/blog/images/textcursor.gif))
 - [ ] Undo and redo
 - [ ] Cut, copy, and paste
 - [ ] Represent modifications using a [Piece Table](https://en.wikipedia.org/wiki/Piece_table) data structure
